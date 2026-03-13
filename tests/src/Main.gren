@@ -46,4 +46,5 @@ main =
             , Test.Compiler.Parse.Type.tests
             , Test.Compiler.Parse.Declaration.tests
             , Test.Compiler.Parse.Module.tests
+--            , Test.Formatter.Format.tests
             ]
