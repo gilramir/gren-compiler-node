@@ -1,0 +1,103 @@
+module Test.Formatter.Strings exposing (tests)
+
+import Expect
+import Test exposing (Test, describe, test)
+import Formatter.Strings exposing (countCodepointsLastLine, countNewlines)
+
+
+tests : Test
+tests =
+    describe "Formatter.Strings"
+        [ countCodepointsLastLineTests
+        , countNewlineTests
+        ]
+
+
+countCodepointsLastLineTests : Test
+countCodepointsLastLineTests =
+    describe "countCodepointsLastLine"
+        [ test "Single line, empty string" <| \{} ->
+            countCodepointsLastLine ""
+                |> Expect.equal 0
+
+        , test "Single line, 1 ASCII-block char string" <| \{} ->
+            countCodepointsLastLine "a"
+                |> Expect.equal 1
+
+        , test "Single line, 1 Latin-1 char string" <| \{} ->
+            countCodepointsLastLine "ó"
+                |> Expect.equal 1
+
+        , test "Single line, 1 Hangeul char string" <| \{} ->
+            countCodepointsLastLine "삼"
+                |> Expect.equal 1
+
+        , test "Single line, 1 Thai grapheme cluster string" <| \{} ->
+            countCodepointsLastLine "รู้"
+                -- There are 3 Unicode code points in this Thai grapheme
+                -- cluster
+                |> Expect.equal 3
+
+        , test "Two lines, empty string" <| \{} ->
+            countCodepointsLastLine "foo\n"
+                |> Expect.equal 0
+
+        , test "Two lines, 1 ASCII-block char string" <| \{} ->
+            countCodepointsLastLine "foo\na"
+                |> Expect.equal 1
+
+        , test "Two lines, 1 Latin-1 char string" <| \{} ->
+            countCodepointsLastLine "foo\nó"
+                |> Expect.equal 1
+
+        , test "Two lines, 1 Hangeul char string" <| \{} ->
+            countCodepointsLastLine "foo\n삼"
+                |> Expect.equal 1
+
+        , test "Two lines, 1 Thai grapheme cluster string" <| \{} ->
+            countCodepointsLastLine "foo\nรู้"
+                -- There are 3 Unicode code points in this Thai grapheme
+                -- cluster
+                |> Expect.equal 3
+
+        , test "Single line, 12 chars" <| \{} ->
+            countCodepointsLastLine "This is gren"
+                |> Expect.equal 12
+
+        , test "Two lines, 4 chars" <| \{} ->
+            countCodepointsLastLine "This is\ngren"
+                |> Expect.equal 4
+
+        , test "Three lines, 4 chars" <| \{} ->
+            countCodepointsLastLine "This\nis\ngren"
+                |> Expect.equal 4
+
+        ]
+
+countNewlineTests : Test
+countNewlineTests =
+    describe "countNewLines"
+        [ test "0 newlines" <| \{} ->
+            countNewlines "a single line of text"
+                |> Expect.equal 0
+
+        , test "1 newline at the end" <| \{} ->
+            countNewlines "first line\n"
+                |> Expect.equal 1
+
+        , test "1 newline at the beginning" <| \{} ->
+            countNewlines "\nsecond line"
+                |> Expect.equal 1
+
+        , test "1 newline in the middle" <| \{} ->
+            countNewlines "first line\nsecond line"
+                |> Expect.equal 1
+
+        , test "2 newlines" <| \{} ->
+            countNewlines "first line\nsecond line\nthird line"
+                |> Expect.equal 2
+
+        , test "2 newlines back to back" <| \{} ->
+            countNewlines "first line\n\nthird line"
+                |> Expect.equal 2
+        ]
