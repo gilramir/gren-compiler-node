@@ -11,13 +11,15 @@ import Dict exposing (Dict)
 
 type alias Context =
     { indent : Int
+    , lineStart : Int
     , comments : Dict Int (Array Comment)
     }
 
 
 empty : Context
 empty =
-    { indent = 0
+    { indent = 1
+    , lineStart = 1
     , comments = Dict.empty
     }
 
@@ -31,4 +33,4 @@ type alias Comment =
 
 type CommentValue
     = Line String
-    | MultiLine String
+    | Block String

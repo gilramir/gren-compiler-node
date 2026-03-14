@@ -1,6 +1,7 @@
 module Compiler.Parse.Pattern exposing
     ( Error (..)
     , parser
+    , errorToString
     )
 
 
@@ -25,13 +26,62 @@ type Error
     | SpaceError Space.Error
 
 
-spaceParser : Parser Context Error {}
-spaceParser =
-    Parser.mapError SpaceError Space.parser
+errorToString : Error -> String
+errorToString error =
+    when error is
+        ExpectedChar char ->
+            "Expected character '" ++ String.fromChar char ++ "'"
+        
+        ExpectedKeyword keyword ->
+            "Expected keyword '" ++ keyword ++ "'"
+        
+        VariableError varError ->
+            Variable.errorToString varError
+        
+        NumberError numError ->
+            Number.errorToString numError
+        
+        FloatNotSupported ->
+            "Float patterns are not supported"
+        
+        StringError strError ->
+            String.errorToString strError
+        
+        SpaceError spaceError ->
+            Space.errorToString spaceError
+
+
 
 
 parser : Parser Context Error AST.Pattern
 parser =
+    Parser.succeed
+        (\pattern alias ->
+            when alias is
+                Just name ->
+                    SourcePosition.at
+                        pattern.start
+                        name.end
+                        (AST.PAlias { pattern = pattern, name = name })
+
+                Nothing ->
+                    pattern
+        )
+        |> Parser.keep parserNoAlias
+        |> Parser.skip spaceParser
+        |> Parser.keep
+            (Parser.oneOf
+                [ Parser.succeed Just
+                    |> Parser.skip (Parser.token "as" (ExpectedKeyword "as"))
+                    |> Parser.skip spaceParser
+                    |> Parser.keep (SourcePosition.parser lowerCaseVariable)
+                , Parser.succeed Nothing
+                ]
+            )
+
+
+parserNoAlias : Parser Context Error AST.Pattern
+parserNoAlias =
     Parser.oneOf
         [ record
         , array
@@ -48,7 +98,6 @@ record =
         |> Parser.skip spaceParser
         |> Parser.keep (Parser.loop [] recordInnerLoop)
         |> Parser.keep Parser.getPosition
-        |> Parser.skip spaceParser
 
 
 recordInnerLoop : Array AST.PRecordField -> Parser Context Error (Parser.Step (Array AST.PRecordField) (Array AST.PRecordField))
@@ -96,14 +145,14 @@ array =
         |> Parser.skip spaceParser
         |> Parser.keep
             ( Parser.oneOf
-                [ Parser.lazy (\_ -> parser)
+                [ Parser.lazy (\_ -> parserNoAlias)
+                    |> Parser.skip spaceParser
                     |> Parser.andThen (\firstArg -> Parser.loop [ firstArg ] arrayInnerLoop)
                 , Parser.succeed []
                     |> Parser.skip (Parser.chompChar ']' (ExpectedChar ']'))
                 ]
             )
         |> Parser.keep Parser.getPosition
-        |> Parser.skip spaceParser
 
 
 arrayInnerLoop : Array AST.Pattern -> Parser Context Error (Parser.Step (Array AST.Pattern) (Array AST.Pattern))
@@ -123,9 +172,16 @@ parenthesized : Parser Context Error AST.Pattern
 parenthesized =
     Parser.succeed identity
         |> Parser.skip (Parser.chompChar '(' (ExpectedChar '('))
-        |> Parser.keep (Parser.lazy (\_ -> parser))
-        |> Parser.skip (Parser.chompChar ')' (ExpectedChar ')'))
         |> Parser.skip spaceParser
+        -- When parens are used, allow `as` pattern
+        |> Parser.keep
+            (Parser.oneOf
+                [ SourcePosition.parser (numberBy Number.parser)
+                , Parser.lazy (\_ -> parser)
+                ]
+            )
+        |> Parser.skip spaceParser
+        |> Parser.skip (Parser.chompChar ')' (ExpectedChar ')'))
 
 
 term : Parser Context Error AST.Pattern
@@ -144,17 +200,13 @@ term =
                         )
                 , lowerCaseVariable
                     |> Parser.map AST.PVar
-                , Parser.succeed (\start var end arg -> { ctor = SourcePosition.at start end var, arg = arg })
-                    |> Parser.keep Parser.getPosition
-                    |> Parser.keep Variable.foreignUpper
-                    |> Parser.mapError VariableError
-                    |> Parser.keep Parser.getPosition
+                , Parser.succeed (\var arg -> { ctor = var, arg = arg })
+                    |> Parser.keep (SourcePosition.parser (Parser.mapError VariableError Variable.foreignUpper))
                     |> Parser.skip spaceParser
                     |> Parser.keep
                         (Parser.oneOf
-                            [ Parser.lazy (\_ -> parser)
-                                |> Parser.backtrackable
-                                |> Parser.map Just
+                            [ Parser.succeed Just
+                                |> Parser.keep (Parser.lazy (\_ -> parserNoAlias))
                             , Parser.succeed Nothing
                             ]
                         )
@@ -167,7 +219,7 @@ term =
                                         , arg = arg
                                         }
 
-                                Variable.Qualified { module_, name  } ->
+                                Variable.Qualified { module_, name } ->
                                     AST.PCtorQual
                                         { varRegion = { start = start, end = end }
                                         , module_ = module_
@@ -175,20 +227,7 @@ term =
                                         , arg = arg
                                         }
                         )
-                , Number.parser
-                    |> Parser.mapError NumberError
-                    |> Parser.andThen
-                        (\num ->
-                            when num is
-                                Number.Integer int ->
-                                    Parser.succeed <| AST.PInt { isHex = False, value = int }
-
-                                Number.Hex int ->
-                                    Parser.succeed <| AST.PInt { isHex = True, value = int }
-
-                                Number.FloatingPoint _ ->
-                                    Parser.problem FloatNotSupported
-                        )
+                , numberBy Number.zeroOrHigher
                 , String.string
                     |> Parser.mapError StringError
                     |> Parser.map AST.PStr
@@ -198,10 +237,54 @@ term =
                 ]
             )
         |> Parser.keep Parser.getPosition
-        |> Parser.skip spaceParser
+        -- Correct positions of Constructors
+        |> Parser.map
+            (\t ->
+                when t is
+                    { value = AST.PCtor { name, arg } } ->
+                        { start = t.start
+                        , value = t.value
+                        , end =
+                            Maybe.map .end arg
+                                |> Maybe.withDefault name.end
+                        }
+
+                    { value = AST.PCtorQual { varRegion, arg } } ->
+                        { start = t.start
+                        , value = t.value
+                        , end =
+                            Maybe.map .end arg
+                                |> Maybe.withDefault varRegion.end
+                        }
+
+                    _ ->
+                        t
+            )
+
+
+spaceParser : Parser Context Error {}
+spaceParser =
+    Parser.mapError SpaceError Space.parser
 
 
 lowerCaseVariable : Parser Context Error String
 lowerCaseVariable =
-    Variable.lowerCase
-        |> Parser.mapError VariableError
+    Parser.mapError VariableError Variable.lowerCase
+
+
+numberBy : Parser Context Number.Error Number.Outcome -> Parser Context Error AST.Pattern_
+numberBy numParser =
+    numParser
+        |> Parser.mapError NumberError
+        |> Parser.andThen
+            (\num ->
+                when num is
+                    Number.Integer int ->
+                        Parser.succeed <| AST.PInt { isHex = False, value = int }
+
+                    Number.Hex int ->
+                        Parser.succeed <| AST.PInt { isHex = True, value = int }
+
+                    Number.FloatingPoint _ ->
+                        Parser.problem FloatNotSupported
+            )
