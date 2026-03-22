@@ -1,9 +1,8 @@
-# compiler-node
+# Re-usable Compiler Functionality on Node.JS
 
-Currently, the Gren compiler consist of two parts: One part written in Gren which communicates with the
-other part written in Haskell.
+This package exposes functionality used by the Gren compiler which is Node.JS specific. This includes things
+like finding all the source files of a project.
 
-This is a temporary migration strategy. In the future, the compiler will only contain Gren code.
+You will find additional functionality in [gren-lang/compiler-common](https://packages.gren-lang.org/package/gren-lang/compiler-common/latest/overview).
 
-The goal of this package is to make it easier to use the compiler to build language tools, or to
-integrate the compiler in your own code.
+You will probably use this module as an extension of `gren-lang/compiler-common`.

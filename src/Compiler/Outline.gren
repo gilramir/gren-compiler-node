@@ -1,11 +1,15 @@
 module Compiler.Outline exposing
-    ( Outline(..)
+    ( Outline (..)
     , AppOutline
     , PkgOutline
-    , VersionConstraint(..)
+    , VersionConstraint (..)
     , Exposed (..)
-    --
     , defaultSummary
+    --
+    , ReadFromPathError (..)
+    , readFromPath
+    --
+    , FindSourceFilesError (..)
     , findSourceFiles
     --
     , jsonDecoder
@@ -16,7 +20,11 @@ module Compiler.Outline exposing
 
 {-| Module for working with `gren.json` files.
 
-@docs Outline, AppOutline, PkgOutline, VersionConstraint, Exposed, defaultSummary, findSourceFiles
+@docs Outline, AppOutline, PkgOutline, VersionConstraint, Exposed, defaultSummary
+
+## Read from disk
+
+@docs readFromPath, ReadFromPathError, findSourceFiles, FindSourceFilesError
 
 ## JSON
 
@@ -38,7 +46,9 @@ import Dict exposing (Dict)
 import Task exposing (Task)
 
 
-{-|-}
+{-| Representation of a `gren.json` file. These files are different based on
+the project type: applications and packages.
+-}
 type Outline
     = App AppOutline
     | Pkg PkgOutline
@@ -69,7 +79,8 @@ type alias PkgOutline =
     }
 
 
-{-| Exposed modules in [PkgOutline](#PkgOutline).
+{-| Exposed modules in [PkgOutline](#PkgOutline). Modules that become available
+when you're importing the package as a dependency.
 -}
 type Exposed
     = ExposedArray (Array ModuleName)
@@ -83,16 +94,56 @@ type VersionConstraint a
     | LocalPath Path
 
 
-{-| The default summary created by `gren init`.
+{-| The default summary used when creating `gren.json` using `gren init`.
 -}
 defaultSummary : String
 defaultSummary =
     "helpful summary of your project, less than 80 characters"
 
 
-{-| Find the source files of a given project.
+{-| The types of errors that can occur when reading an `Outline` from the filesystem.
 -}
-findSourceFiles : FileSystem.Permission -> Outline -> Path -> Task FileSystem.Error (Array { path : Path, moduleName : String, source : String })
+type ReadFromPathError
+    = FromPathFileSystemError FileSystem.Error
+    | FromPathInvalidString
+    | FromPathInvalidJson Decode.Error
+
+
+{-| Read the `Outline` located at the given `Path`.
+-}
+readFromPath : FileSystem.Permission -> Path -> Task ReadFromPathError Outline
+readFromPath fsPerm path =
+    FileSystem.readFile fsPerm path
+        |> Task.mapError FromPathFileSystemError
+        |> Task.andThen
+            (\bytes ->
+                when Bytes.toString bytes is
+                    Just str ->
+                        when Decode.decodeString jsonDecoder str is
+                            Ok outline ->
+                                Task.succeed outline
+
+                            Err jsonErr ->
+                                Task.fail <| FromPathInvalidJson jsonErr
+
+                    Nothing ->
+                        Task.fail FromPathInvalidString
+            )
+
+
+{-| The types of errors  that can occur when retrieving the source code of a project.
+-}
+type FindSourceFilesError
+    = FileSystemError FileSystem.Error
+    | FilePathInvalidModuleName { path : Path, inferredModuleName : String }
+    | FileContentNotValidString Path
+
+
+{-| Find the source files of a given project.
+
+When used on core packages, like `gren-lang/core`, this function can return JavaScript files.
+-}
+findSourceFiles : FileSystem.Permission -> Outline -> Path -> Task FindSourceFilesError (Array { path : Path, moduleName : ModuleName, source : String })
 findSourceFiles fsPerm outline outlinePath =
     let
         sourceDirs =
@@ -111,9 +162,10 @@ findSourceFiles fsPerm outline outlinePath =
         |> Task.andThen (\paths -> Task.concurrent <| Array.map (readSourceFile fsPerm) paths)
 
 
-findSourceFilesHelp : FileSystem.Permission -> Path -> Path -> Task FileSystem.Error (Array { absolute : Path, relative : Path })
+findSourceFilesHelp : FileSystem.Permission -> Path -> Path -> Task FindSourceFilesError (Array { absolute : Path, relative : Path })
 findSourceFilesHelp fsPerm local root =
     FileSystem.listDirectory fsPerm root
+        |> Task.mapError FileSystemError
         |> Task.andThen
             (\paths ->
                 paths
@@ -129,7 +181,12 @@ findSourceFilesHelp fsPerm local root =
                                             Path.append entry.path local
                                     in
                                     if entry.path.extension == "gren" || isKernelCode fullLocalPath then
-                                        Just <| Task.succeed [ { absolute = Path.append entry.path root, relative = fullLocalPath } ]
+                                        Just <|
+                                            Task.succeed
+                                                [ { absolute = Path.append entry.path root
+                                                  , relative = fullLocalPath
+                                                  }
+                                                ]
 
                                     else
                                         Nothing
@@ -161,22 +218,39 @@ kernelCodePrefixPath =
     Path.fromPosixString "Gren/Kernel"
 
 
-readSourceFile : FileSystem.Permission -> { absolute : Path, relative : Path } -> Task FileSystem.Error { path : Path, moduleName : String, source : String }
+readSourceFile : FileSystem.Permission -> { absolute : Path, relative : Path } -> Task FindSourceFilesError { path : Path, moduleName : ModuleName, source : String }
 readSourceFile fsPerm { absolute, relative } =
     FileSystem.readFile fsPerm absolute
-        |> Task.map
+        |> Task.mapError FileSystemError
+        |> Task.andThen
             (\source ->
-                { path = absolute
-                , moduleName =
-                    -- TODO: check if valid module name
-                    { relative | extension = "" }
-                        |> Path.toPosixString
-                        |> String.replace "/" "."
-                , source =
-                    -- TODO: Error
-                    Bytes.toString source
-                        |> Maybe.withDefault ""
-                }
+                let
+                    inferredModuleName =
+                        { relative | extension = "" }
+                            |> Path.toPosixString
+                            |> String.replace "/" "."
+
+                    sourceString =
+                        Bytes.toString source
+                in
+                when { moduleName = ModuleName.fromString inferredModuleName, sourceString = sourceString } is
+                    { moduleName = Just modName, sourceString = Just srcStr } ->
+                        Task.succeed <|
+                            { path = absolute
+                            , moduleName = modName
+                            , source = srcStr
+                            }
+
+                    { moduleName = Nothing } ->
+                        Task.fail <|
+                            FilePathInvalidModuleName
+                                { path = relative
+                                , inferredModuleName = inferredModuleName
+                                }
+
+                    { sourceString = Nothing } ->
+                        Task.fail <|
+                            FileContentNotValidString relative
             )
 
 
