@@ -13,7 +13,10 @@
         "Compiler.Package",
         "Compiler.Paths",
         "FileSystem.Lock",
-        "Formatter.PrettyPrinter"
+        "Formatter.PrettyPrinter",
+        "Formatter.LPTCreate",
+        "Formatter.LPTJson",
+        "Formatter.LPTPretty"
     ],
     "gren-version": "0.6.0 <= v < 0.7.0",
     "dependencies": {
