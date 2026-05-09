@@ -14,7 +14,7 @@
         "Compiler.Paths",
         "FileSystem.Lock",
         "Formatter.PrettyPrinter",
-        "Formatter.LPTCreate",
+        "Formatter.MakeLogical",
         "Formatter.LPTJson",
         "Formatter.MakePretty"
     ],
