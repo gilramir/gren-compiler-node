@@ -15,9 +15,11 @@
         "FileSystem.Lock",
         "Formatter.AstCompare",
         "Formatter.PrettyPrinter",
+        "Formatter.InsertExpressions",
         "Formatter.MakeLogical",
         "Formatter.LPTJson",
-        "Formatter.MakePretty"
+        "Formatter.MakePretty",
+        "Formatter.VerticalSpace"
     ],
     "gren-version": "0.6.0 <= v < 0.7.0",
     "dependencies": {
