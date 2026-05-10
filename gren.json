@@ -13,6 +13,7 @@
         "Compiler.Package",
         "Compiler.Paths",
         "FileSystem.Lock",
+        "Formatter.AstCompare",
         "Formatter.PrettyPrinter",
         "Formatter.MakeLogical",
         "Formatter.LPTJson",
