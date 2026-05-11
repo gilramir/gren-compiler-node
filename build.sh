@@ -18,4 +18,5 @@ run_gren make Formatter.PrettyPrinter
 
 # Now build for real
 cd ../compiler
-run_gren make Main
+devbox run build
+#run_gren make Main
