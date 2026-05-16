@@ -17,6 +17,6 @@ function run_gren() {
 run_gren make Formatter.PrettyPrinter
 
 # Now build for real
-cd ../compiler
-devbox run build
+#cd ../compiler
+#devbox run build
 #run_gren make Main
