@@ -30,7 +30,6 @@ it to the terminal.
 -}
 
 
-import Math
 
 
 {-| A `Document` represents formatted text.
@@ -220,7 +219,10 @@ type alias ToStringOptions =
 -}
 defaultOptions : ToStringOptions
 defaultOptions =
-    { maxColumns = Math.maxSafeInteger
+    -- `Int`'s maximum, meaning "never wrap". `Math.maxSafeInteger` until D2's
+    -- flag day, which was 2^53 - 1 and so not an `Int` once an `Int` became 32
+    -- bits (`geng-lang/docs/m1b-int.md` §I20).
+    { maxColumns = 2147483647
     , indentationSize = 4
     , newlineSeparator = "\n"
     }
