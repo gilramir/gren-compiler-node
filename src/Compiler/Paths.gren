@@ -97,7 +97,7 @@ cacheRoot platform envVars homeDir grenVersion =
 
         
         endPath =
-            [ "gren"
+            [ "geng"
             , SemanticVersion.toString grenVersion
             ]
                 |> String.join "/"
@@ -121,10 +121,10 @@ backendBinary platform (CacheRoot cache) =
         binPath =
             when platform is
                 Node.Win32 ->
-                    Path.fromPosixString "bin/gren.exe"
+                    Path.fromPosixString "bin/geng.exe"
 
                 _ ->
-                    Path.fromPosixString "bin/gren"
+                    Path.fromPosixString "bin/geng"
     in
     Path.append binPath cache
 
@@ -137,7 +137,7 @@ packageSources (CacheRoot cache) =
     Path.prepend cache (Path.fromPosixString "packages")
 
 
-{-| The `Path` for the project that backs the `gren repl` command.
+{-| The `Path` for the project that backs the `geng repl` command.
 -}
 repl : CacheRoot -> Path
 repl (CacheRoot cache) =

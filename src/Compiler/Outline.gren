@@ -94,7 +94,7 @@ type VersionConstraint a
     | LocalPath Path
 
 
-{-| The default summary used when creating `gren.json` using `gren init`.
+{-| The default summary used when creating `gren.json` using `geng init`.
 -}
 defaultSummary : String
 defaultSummary =
