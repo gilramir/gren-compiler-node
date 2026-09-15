@@ -180,7 +180,7 @@ findSourceFilesHelp fsPerm local root =
                                         fullLocalPath =
                                             Path.append entry.path local
                                     in
-                                    if entry.path.extension == "gren" || isKernelCode fullLocalPath then
+                                    if entry.path.extension == "gren" || isKernelCode fullLocalPath || isExternCode fullLocalPath then
                                         Just <|
                                             Task.succeed
                                                 [ { absolute = Path.append entry.path root
@@ -211,6 +211,29 @@ isKernelCode path =
 
     else
         False
+
+
+{-| A `js` extern's implementation, `Ext/<Module>.js` under a source directory
+(`ffi.md` F1, D198). It is read with the Gren sources, under the module name
+`Ext.<Module>`, the way kernel code is read under `Gren.Kernel.<Module>`.
+-}
+isExternCode : Path -> Bool
+isExternCode path =
+    if path.extension == "js" then
+        when Path.parentPath path is
+            Just parent ->
+                parent == externCodePrefixPath
+
+            Nothing ->
+                False
+
+    else
+        False
+
+
+externCodePrefixPath : Path
+externCodePrefixPath =
+    Path.fromPosixString "Ext"
 
 
 kernelCodePrefixPath : Path
