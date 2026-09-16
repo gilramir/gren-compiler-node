@@ -97,6 +97,29 @@ describe("compiler-node", () => {
         });
     });
 
+    // A lock is stale once nobody has touched it for five seconds, so a
+    // holder past that must keep touching it.
+    it("Keeps a lock held past the staleness limit", async () => {
+      const proc = childProc.spawn(
+        path.join(rootDir, "bin/app"),
+        ["lock", "7000"],
+        {
+          cwd: rootDir,
+        },
+      );
+
+      await new Promise((r) => setTimeout(r, 6000));
+
+      return runner()
+        .cwd(rootDir)
+        .fork("bin/app", ["lock", "50"], {})
+        .stdout("Already Locked")
+        .expect(async () => {
+          proc.kill();
+          await fsProm.rm(".lock", { recursive: true });
+        });
+    });
+
     it("Ignores stale locks", async () => {
       const lockPath = path.join(rootDir, ".lock");
       await fsProm.mkdir(lockPath);
