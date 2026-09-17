@@ -1,0 +1,28 @@
+[package]
+name = "github.com/geng-language/compiler-node"
+version = "5.0.0"
+summary = "Node specific functionality of the Gren compiler"
+license = "BSD-3-Clause"
+geng = "0.6.0 <= v < 0.7.0"
+
+[platform]
+runtime = "node"
+
+[modules]
+exposed = [
+    "Cli.Parser",
+    "Cli.PrettyPrinter",
+    "Cli.Report",
+    "Compiler.Backend",
+    "Compiler.Lock",
+    "Compiler.Outline",
+    "Compiler.Package",
+    "Compiler.Paths",
+    "FileSystem.Lock",
+]
+
+[dependencies]
+"github.com/geng-language/compiler-common" = "3.0.0 <= v < 4.0.0"
+"github.com/geng-language/stream" = "0.1.0 <= v < 0.2.0"
+"github.com/geng-language/node" = "6.1.0 <= v < 7.0.0"
+"github.com/gilramir/gren-toml" = "1.1.0 <= v < 2.0.0"

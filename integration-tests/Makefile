@@ -1,7 +1,7 @@
 node_modules: package.json package-lock.json
 	npm ci
 
-bin/app: Makefile gren.json node_modules ../gren.json ../src/**/*.gren
+bin/app: Makefile geng.toml node_modules ../geng.toml ../src/**/*.gren
 	geng make Main --output=bin/app
 	chmod +x bin/app
 

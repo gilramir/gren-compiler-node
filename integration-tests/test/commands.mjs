@@ -12,54 +12,71 @@ const appDir = path.resolve("bin");
 const homeDir = os.homedir();
 
 describe("compiler-node", () => {
-  describe("finding gren.json", () => {
-    it("Finds correct gren.json path", () => {
+  describe("finding geng.toml", () => {
+    it("Finds correct geng.toml path", () => {
       return runner()
         .cwd(rootDir)
-        .fork("bin/app", ["find gren.json"], {})
-        .stdout(path.join(rootDir, "gren.json"));
+        .fork("bin/app", ["find geng.toml"], {})
+        .stdout(path.join(rootDir, "geng.toml"));
     });
 
-    it("Finds correct gren.json path from sub-folder", () => {
+    it("Finds correct geng.toml path from sub-folder", () => {
       return runner()
         .cwd(appDir)
-        .fork("app", ["find gren.json"], {})
-        .stdout(path.join(rootDir, "gren.json"));
+        .fork("app", ["find geng.toml"], {})
+        .stdout(path.join(rootDir, "geng.toml"));
     });
 
-    it("Outputs error message if gren.json couldn't be found", () => {
+    it("Outputs error message if geng.toml couldn't be found", () => {
       return runner()
         .cwd(homeDir)
-        .fork(path.join(appDir, "app"), ["find gren.json"], {})
+        .fork(path.join(appDir, "app"), ["find geng.toml"], {})
         .stdout("ENOENT");
     });
   });
 
-  describe("parsing gren.json", () => {
-    const packageGrenJson = JSON.parse(
-      fs.readFileSync(path.join(rootDir, "..", "gren.json"), "utf-8"),
-    );
-    const integrationTestGrenJson = JSON.parse(
-      fs.readFileSync(path.join(rootDir, "gren.json"), "utf-8"),
-    );
+  // Node has no TOML reader, and these manifests are written one entry to a
+  // line, so the expectation is read from the file with a pattern per line.
+  const expectedOf = (file) => {
+    const text = fs.readFileSync(file, "utf-8");
+    const expected = { dependencies: {}, sources: [] };
+    let table = "";
+    for (const line of text.split("\n")) {
+      const header = line.match(/^\[([a-z.]+)\]$/);
+      const entry = line.match(/^"?([^"=]+?)"? = (.*)$/);
+      if (header) {
+        table = header[1];
+        if (table === "application" || table === "package") expected.type = table;
+      } else if (entry && table === "package" && (entry[1] === "name" || entry[1] === "version")) {
+        expected[entry[1]] = JSON.parse(entry[2]);
+      } else if (entry && table === "dependencies") {
+        expected.dependencies[entry[1]] = JSON.parse(entry[2]);
+      } else if (entry && table === "sources") {
+        expected.sources.push(entry[1]);
+      }
+    }
+    expected.sources.sort();
+    return expected;
+  };
 
-    it("Correctly parses the integration test projects gren.json", () => {
+  describe("parsing geng.toml", () => {
+    it("Correctly parses the integration test project's geng.toml", () => {
+      const expected = expectedOf(path.join(rootDir, "geng.toml"));
       return runner()
         .cwd(rootDir)
-        .fork("bin/app", ["parse gren.json"], {})
+        .fork("bin/app", ["parse geng.toml"], {})
         .expect(({ assert, result }) => {
-          const parsed = JSON.parse(result.stdout);
-          assert.deepStrictEqual(integrationTestGrenJson, parsed);
+          assert.deepStrictEqual(JSON.parse(result.stdout), expected);
         });
     });
 
-    it("Correctly parses the package's gren.json", () => {
+    it("Correctly parses the package's geng.toml", () => {
+      const expected = expectedOf(path.join(packageDir, "geng.toml"));
       return runner()
         .cwd(packageDir)
-        .fork("integration-tests/bin/app", ["parse gren.json"], {})
+        .fork("integration-tests/bin/app", ["parse geng.toml"], {})
         .expect(({ assert, result }) => {
-          const parsed = JSON.parse(result.stdout);
-          assert.deepStrictEqual(packageGrenJson, parsed);
+          assert.deepStrictEqual(JSON.parse(result.stdout), expected);
         });
     });
   });

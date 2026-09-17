@@ -8,8 +8,11 @@ import FileSystem.Path as Path
 import FileSystem.Lock as Lock
 import Compiler.Paths as Paths
 import Compiler.Outline as Outline
+import Compiler.PackageName as PackageName
+import Dict
+import SemanticVersion
+import SemanticVersionRange
 import Stream
-import Json.Decode as Decode
 import Json.Encode as Encode
 import Process
 
@@ -19,23 +22,25 @@ main =
     Task.await Node.getEnvironment <| \env ->
     Task.await FileSystem.initialize <| \fsPerm ->
         when Array.get 2 env.args is
-            Just "find gren.json" ->
+            Just "find geng.toml" ->
                 Paths.projectOutline fsPerm
                     |> Task.map Path.toPosixString
                     |> Task.onError (\fsErr -> Task.succeed (FileSystem.errorCode fsErr))
                     |> Task.andThen (log env.stdout)
 
-            Just "parse gren.json" ->
+            Just "parse geng.toml" ->
                 Paths.projectOutline fsPerm
-                    |> Task.andThen (\grenJsonPath ->
-                        FileSystem.readFile fsPerm grenJsonPath
+                    |> Task.andThen (\manifestPath ->
+                        FileSystem.readFile fsPerm manifestPath
                             |> Task.map (Maybe.withDefault "" << Bytes.toString)
                             |> Task.map
-                                (\json ->
-                                    json
-                                        |> Decode.decodeString Outline.jsonDecoder
-                                        |> Result.map (Outline.toJson >> Encode.encode 4)
-                                        |> Result.withDefault "{}"
+                                (\toml ->
+                                    when Outline.readFromString toml is
+                                        Ok outline ->
+                                            Encode.encode 4 (describe outline)
+
+                                        Err err ->
+                                            Outline.readErrorToString err
                                 )
                     )
                     |> Task.onError (\fsErr -> Task.succeed (FileSystem.errorCode fsErr))
@@ -69,6 +74,31 @@ main =
 
             _ ->
                 log env.stdout "Invalid start argument"
+
+
+{-| What a manifest was read as: its kind, its name and version if it is a
+package, its dependencies as ranges, and the keys of its `[sources]`.
+-}
+describe : Outline.Outline -> Encode.Value
+describe outline =
+    let
+        common kind dependencies sources =
+            [ { key = "type", value = Encode.string kind }
+            , { key = "dependencies", value = Encode.dict identity (Encode.string << SemanticVersionRange.toString) dependencies }
+            , { key = "sources", value = Encode.array Encode.string (Dict.keys sources) }
+            ]
+    in
+    when outline is
+        Outline.App app ->
+            Encode.object (common "application" app.dependencies app.sources)
+
+        Outline.Pkg pkg ->
+            Encode.object
+                ([ { key = "name", value = Encode.string (PackageName.toString pkg.name) }
+                 , { key = "version", value = Encode.string (SemanticVersion.toString pkg.version) }
+                 ]
+                    ++ common "package" pkg.dependencies pkg.sources
+                )
 
 
 log : Stream.Writable Bytes -> String -> Task x {}

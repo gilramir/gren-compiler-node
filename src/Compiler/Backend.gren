@@ -288,7 +288,7 @@ commandEncoder interactive pathToString command =
                 [ { key = "command", value = Json.string "repl" }
                 , { key = "interpreter" , value = maybeEncoder Json.string flags.interpreter }
                 , { key = "project-path", value = Json.string <| pathToString flags.projectPath }
-                , { key = "project-outline", value = Outline.toJson flags.outline }
+                , { key = "project-outline", value = Outline.toJson (chosenVersions flags.dependencies) flags.outline }
                 , { key = "sources", value = Json.dict identity (sourceFileToJson pathToString) flags.rootSources }
                 , { key = "dependencies", value = Json.dict identity (depsToJson pathToString) flags.dependencies }
                 ]
@@ -302,7 +302,7 @@ commandEncoder interactive pathToString command =
                 , { key = "report-json", value = maybeToBool flags.report }
                 , { key = "project-path", value = Json.string <| pathToString flags.projectPath }
                 , { key = "entry-points", value = Json.array ModuleName.toJson flags.entryPoints }
-                , { key = "project-outline", value = Outline.toJson flags.outline }
+                , { key = "project-outline", value = Outline.toJson (chosenVersions flags.dependencies) flags.outline }
                 , { key = "sources", value = Json.dict identity (sourceFileToJson pathToString) flags.rootSources }
                 , { key = "dependencies", value = Json.dict identity (depsToJson pathToString) flags.dependencies }
                 ]
@@ -313,7 +313,7 @@ commandEncoder interactive pathToString command =
                 , { key = "output", value = maybeEncoder docsOutputEncoder flags.output }
                 , { key = "report-json", value = maybeToBool flags.report }
                 , { key = "project-path", value = Json.string <| pathToString flags.projectPath }
-                , { key = "project-outline", value = Outline.toJson flags.outline }
+                , { key = "project-outline", value = Outline.toJson (chosenVersions flags.dependencies) flags.outline }
                 , { key = "sources", value = Json.dict identity (sourceFileToJson pathToString) flags.rootSources }
                 , { key = "dependencies", value = Json.dict identity (depsToJson pathToString) flags.dependencies }
                 ]
@@ -327,7 +327,7 @@ commandEncoder interactive pathToString command =
                 , { key = "current-version"
                   , value =
                     Json.object
-                        [ { key = "project-outline", value = Outline.toJson flags.currentVersion.outline }
+                        [ { key = "project-outline", value = Outline.toJson (chosenVersions flags.currentVersion.dependencies) flags.currentVersion.outline }
                         , { key = "sources", value = Json.dict identity (sourceFileToJson pathToString) flags.currentVersion.rootSources }
                         , { key = "dependencies", value = Json.dict identity (depsToJson pathToString) flags.currentVersion.dependencies }
                         ]
@@ -337,7 +337,7 @@ commandEncoder interactive pathToString command =
                     maybeEncoder
                         (\package ->
                             Json.object
-                                [ { key = "project-outline", value = Outline.toJson package.outline }
+                                [ { key = "project-outline", value = Outline.toJson (chosenVersions package.dependencies) package.outline }
                                 , { key = "sources", value = Json.dict identity (sourceFileToJson pathToString) package.rootSources }
                                 , { key = "dependencies", value = Json.dict identity (depsToJson pathToString) package.dependencies }
                                 ]
@@ -355,7 +355,7 @@ commandEncoder interactive pathToString command =
                 , { key = "current-version"
                   , value =
                     Json.object
-                        [ { key = "project-outline", value = Outline.toJson flags.currentVersion.outline }
+                        [ { key = "project-outline", value = Outline.toJson (chosenVersions flags.currentVersion.dependencies) flags.currentVersion.outline }
                         , { key = "sources", value = Json.dict identity (sourceFileToJson pathToString) flags.currentVersion.rootSources }
                         , { key = "dependencies", value = Json.dict identity (depsToJson pathToString) flags.currentVersion.dependencies }
                         ]
@@ -363,7 +363,7 @@ commandEncoder interactive pathToString command =
                 , { key = "published-version"
                   , value =
                     Json.object
-                        [ { key = "project-outline", value = Outline.toJson flags.publishedVersion.outline }
+                        [ { key = "project-outline", value = Outline.toJson (chosenVersions flags.publishedVersion.dependencies) flags.publishedVersion.outline }
                         , { key = "sources", value = Json.dict identity (sourceFileToJson pathToString) flags.publishedVersion.rootSources }
                         , { key = "dependencies", value = Json.dict identity (depsToJson pathToString) flags.publishedVersion.dependencies }
                         ]
@@ -378,7 +378,7 @@ commandEncoder interactive pathToString command =
                 , { key = "first-package"
                   , value =
                     Json.object
-                        [ { key = "project-outline", value = Outline.toJson flags.firstPackage.outline }
+                        [ { key = "project-outline", value = Outline.toJson (chosenVersions flags.firstPackage.dependencies) flags.firstPackage.outline }
                         , { key = "sources", value = Json.dict identity (sourceFileToJson pathToString) flags.firstPackage.rootSources }
                         , { key = "dependencies", value = Json.dict identity (depsToJson pathToString) flags.firstPackage.dependencies }
                         ]
@@ -386,12 +386,20 @@ commandEncoder interactive pathToString command =
                 , { key = "second-package"
                   , value =
                     Json.object
-                        [ { key = "project-outline", value = Outline.toJson flags.secondPackage.outline }
+                        [ { key = "project-outline", value = Outline.toJson (chosenVersions flags.secondPackage.dependencies) flags.secondPackage.outline }
                         , { key = "sources", value = Json.dict identity (sourceFileToJson pathToString) flags.secondPackage.rootSources }
                         , { key = "dependencies", value = Json.dict identity (depsToJson pathToString) flags.secondPackage.dependencies }
                         ]
                   }
                 ]
+
+
+{-| The version chosen for each dependency, which is what an application's
+outline lists for the backend.
+-}
+chosenVersions : Dict String { a | outline : Outline.PkgOutline } -> Dict String SemanticVersion
+chosenVersions dependencies =
+    Dict.map (\_ dep -> dep.outline.version) dependencies
 
 
 sourceFileToJson : (Path -> String) -> SourceFile -> Json.Value
@@ -406,7 +414,7 @@ depsToJson : (Path -> String) -> { path : Path, outline : Outline.PkgOutline, so
 depsToJson pathToString dep =
     Json.object
         [ { key = "path", value = Json.string (pathToString dep.path) }
-        , { key = "outline", value = Outline.toJson (Outline.Pkg dep.outline) }
+        , { key = "outline", value = Outline.toJson Dict.empty (Outline.Pkg dep.outline) }
         , { key = "sources", value = Json.dict identity Json.string dep.sources }
         ]
 

@@ -11,7 +11,7 @@ module Compiler.Package exposing
 
 
 {-| A module for loading and saving the outline and source code of
-packages (projects with a package-formatted `gren.json`).
+packages (projects whose `geng.toml` has a `[package]` table).
 
 @docs Package
 
@@ -56,14 +56,13 @@ the file system.
 -}
 type LoadFromPathError
     = FromPathOutlineFileSystemError FileSystem.Error
-    | FromPathOutlineInvalidString
-    | FromPathOutlineInvalidJson Decode.Error
+    | FromPathOutlineInvalidToml String
     | FromPathOutlineIsApp
     | FromPathFindSourcesError Outline.FindSourceFilesError
 
 
 {-| Loads an entire package from disk. The provided `Path` needs to point to the root
-directory of the package (the directory containing `gren.json`).
+directory of the package (the directory containing `geng.toml`).
 
 For `core`, and a package with externs, the sources might include JavaScript files.
 -}
@@ -75,7 +74,7 @@ loadFromPath fsPermission path =
             (\realPath ->
                 let
                     outlinePath =
-                        Path.append (Path.fromPosixString "gren.json") realPath
+                        Path.append (Path.fromPosixString Outline.fileName) realPath
                 in
                 Outline.readFromPath fsPermission outlinePath
                     |> Task.mapError
@@ -84,11 +83,8 @@ loadFromPath fsPermission path =
                                 Outline.FromPathFileSystemError fsErr ->
                                     FromPathOutlineFileSystemError fsErr
 
-                                Outline.FromPathInvalidString ->
-                                    FromPathOutlineInvalidString
-
-                                Outline.FromPathInvalidJson jsonErr ->
-                                    FromPathOutlineInvalidJson jsonErr
+                                Outline.FromPathInvalidToml tomlErr ->
+                                    FromPathOutlineInvalidToml (Outline.readErrorToString tomlErr)
                         )
                     |> Task.andThen
                         (\outline ->
@@ -168,7 +164,7 @@ saveToStream bundle stream =
 toJson : Package -> Json.Value
 toJson { outline, sources } =
     Json.object
-        [ { key = "outline", value = Outline.toJson (Outline.Pkg outline) }
+        [ { key = "outline", value = Outline.toJson Dict.empty (Outline.Pkg outline) }
         , { key = "sources", value = Json.dict identity Json.string sources }
         ]
 

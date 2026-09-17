@@ -2,33 +2,61 @@ module Compiler.Outline exposing
     ( Outline (..)
     , AppOutline
     , PkgOutline
-    , VersionConstraint (..)
     , Exposed (..)
+    , Source (..)
+    , fileName
     , defaultSummary
     --
     , ReadFromPathError (..)
     , readFromPath
+    , readFromString
+    , readSources
+    , readErrorToString
     --
     , FindSourceFilesError (..)
     , findSourceFiles
     --
-    , jsonDecoder
+    , toToml
+    , setDependency
+    , removeDependency
+    --
     , pkgJsonDecoder
     , toJson
     )
 
 
-{-| Module for working with `gren.json` files.
+{-| Module for working with `geng.toml` files.
 
-@docs Outline, AppOutline, PkgOutline, VersionConstraint, Exposed, defaultSummary
+A project is a directory with a `geng.toml` in it, which is an application's or
+a package's (Geng's `packaging.md` K3 and K8):
+
+    [application]
+    geng = "0.6.0 <= v < 0.7.0"
+    runtime = "node"
+
+    [dependencies]
+    "github.com/geng-language/node" = "6.1.0 <= v < 7.0.0"
+
+    [sources]
+    "github.com/geng-language/node" = { path = "../node" }
+
+It was `gren.json`. The JSON shape survives as what the front end hands the
+backend and what a package bundle holds, since neither is a file anyone writes,
+and it is what [toJson](#toJson) and [pkgJsonDecoder](#pkgJsonDecoder) speak.
+
+@docs Outline, AppOutline, PkgOutline, Exposed, Source, fileName, defaultSummary
 
 ## Read from disk
 
-@docs readFromPath, ReadFromPathError, findSourceFiles, FindSourceFilesError
+@docs readFromPath, readFromString, readSources, ReadFromPathError, readErrorToString, findSourceFiles, FindSourceFilesError
+
+## Write
+
+@docs toToml, setDependency, removeDependency
 
 ## JSON
 
-@docs jsonDecoder, pkgJsonDecoder, toJson
+@docs pkgJsonDecoder, toJson
 -}
 
 import Bytes
@@ -36,7 +64,7 @@ import SemanticVersion exposing (SemanticVersion)
 import SemanticVersionRange exposing (SemanticVersionRange)
 import FileSystem
 import FileSystem.Path as Path exposing (Path)
-import Json.Decode as Decode exposing (Decoder)
+import Json.Decode
 import Json.Encode as Encode
 import Compiler.PackageName as PackageName exposing (PackageName)
 import Compiler.ModuleName as ModuleName exposing (ModuleName)
@@ -44,29 +72,39 @@ import Compiler.License as License exposing (License)
 import Compiler.Platform as Platform exposing (Platform)
 import Dict exposing (Dict)
 import Task exposing (Task)
+import Toml
+import Toml.Decode as Decode exposing (Decoder)
+import Toml.Edit
+import Toml.Table
 
 
-{-| Representation of a `gren.json` file. These files are different based on
-the project type: applications and packages.
+{-| A project's manifest, an application's or a package's.
 -}
 type Outline
     = App AppOutline
     | Pkg PkgOutline
 
 
-{-|-}
+{-| An application chooses what it is built for and with.
+
+`gengVersion` is the range of compilers it builds with. `dependencies` are
+ranges, as a package's are: the versions chosen are the lock file's business,
+not the manifest's.
+-}
 type alias AppOutline =
     { platform : Platform
     , sourceDirectories : Array Path
-    , grenVersion : SemanticVersion
-    , dependencies :
-        { direct : Dict String (VersionConstraint SemanticVersion)
-        , indirect : Dict String (VersionConstraint SemanticVersion)
-        }
+    , gengVersion : SemanticVersionRange
+    , dependencies : Dict String SemanticVersionRange
+    , sources : Dict String Source
     }
 
 
-{-|-}
+{-| A package declares what it is and what it works with.
+
+A package may have `[sources]` too. They apply when the package is the project
+being built, and never when it is someone else's dependency (K9).
+-}
 type alias PkgOutline =
     { platform : Platform
     , name : PackageName
@@ -74,8 +112,9 @@ type alias PkgOutline =
     , license : License
     , version : SemanticVersion
     , exposedModules : Exposed
-    , grenVersion : SemanticVersionRange
-    , dependencies : Dict String (VersionConstraint SemanticVersionRange)
+    , gengVersion : SemanticVersionRange
+    , dependencies : Dict String SemanticVersionRange
+    , sources : Dict String Source
     }
 
 
@@ -87,29 +126,56 @@ type Exposed
     | ExposedDict (Dict String (Array ModuleName))
 
 
-{-| A dependency version constraint. Either a `SemanticVersion`, `SemanticVersionRange` or a `Path` for a local dependency.
+{-| Where the packages under a prefix come from, instead of the git server the
+identifier names (K9). The key the source is filed under is an identifier, or a
+prefix of some, and the longest key that is a prefix of an identifier is the one
+that applies.
+
+  - `Rewrite`: `"git.corp.example/" = "ssh://git@git.corp.example/"`. A key that
+    ends in a slash says how to reach everything below it: the URL is the value
+    followed by the rest of the repository's path. Where a repository ends is
+    still found the usual way.
+  - `Repository`: `"github.com/x/platforms" = "https://mirror.example/p.git"`.
+    The key is where a repository ends, and the value is where to clone it from.
+  - `LocalPath`: `"github.com/x/y" = { path = "../y" }`. A directory holds the
+    package, or with a longer identifier the directory below it that the rest of
+    the identifier names. The version is what its manifest says.
+  - `Commit`: `"codeberg.org/x/toml" = { git = "https://…", rev = "3f2a…" }`. The
+    key is a repository root, and every package in it is taken from that commit
+    rather than from a tag.
 -}
-type VersionConstraint a
-    = Version a
+type Source
+    = Rewrite String
+    | Repository String
     | LocalPath Path
+    | Commit { url : String, rev : String }
 
 
-{-| The default summary used when creating `gren.json` using `geng init`.
+{-| `geng.toml`
+-}
+fileName : String
+fileName =
+    "geng.toml"
+
+
+{-| The default summary used when creating `geng.toml` using `geng init`.
 -}
 defaultSummary : String
 defaultSummary =
     "helpful summary of your project, less than 80 characters"
 
 
+-- READING
+
+
 {-| The types of errors that can occur when reading an `Outline` from the filesystem.
 -}
 type ReadFromPathError
     = FromPathFileSystemError FileSystem.Error
-    | FromPathInvalidString
-    | FromPathInvalidJson Decode.Error
+    | FromPathInvalidToml Decode.Error
 
 
-{-| Read the `Outline` located at the given `Path`.
+{-| Read the `Outline` located at the given `Path`, which names the `geng.toml`.
 -}
 readFromPath : FileSystem.Permission -> Path -> Task ReadFromPathError Outline
 readFromPath fsPerm path =
@@ -117,18 +183,411 @@ readFromPath fsPerm path =
         |> Task.mapError FromPathFileSystemError
         |> Task.andThen
             (\bytes ->
-                when Bytes.toString bytes is
-                    Just str ->
-                        when Decode.decodeString jsonDecoder str is
-                            Ok outline ->
-                                Task.succeed outline
+                when Decode.fromBytes decoder bytes is
+                    Ok outline ->
+                        Task.succeed outline
 
-                            Err jsonErr ->
-                                Task.fail <| FromPathInvalidJson jsonErr
+                    Err err ->
+                        Task.fail (FromPathInvalidToml err)
+            )
+
+
+{-| Read an `Outline` from the text of a `geng.toml`.
+-}
+readFromString : String -> Result Decode.Error Outline
+readFromString =
+    Decode.fromString decoder
+
+
+{-| Read the `[sources]` of a file that has nothing else, which is what the
+user's `config.toml` is: the same table applied to every build on the machine
+(K9).
+-}
+readSources : String -> Result Decode.Error (Dict String Source)
+readSources =
+    Decode.fromString
+        (Decode.succeed (\{} sources -> sources)
+            |> Decode.andMap (onlyKeys [ "sources" ])
+            |> Decode.andMap sourcesTableDecoder
+        )
+
+
+{-| What was wrong with a `geng.toml`, as a line of text.
+-}
+readErrorToString : Decode.Error -> String
+readErrorToString =
+    Decode.errorToString
+
+
+decoder : Decoder Outline
+decoder =
+    Decode.table
+        |> Decode.andThen
+            (\top ->
+                when
+                    { app = Toml.Table.member "application" top
+                    , pkg = Toml.Table.member "package" top
+                    }
+                is
+                    { app = True, pkg = True } ->
+                        Decode.fail "a manifest has an [application] table or a [package] table, not both"
+
+                    { app = True } ->
+                        Decode.map App appDecoder
+
+                    { pkg = True } ->
+                        Decode.map Pkg pkgDecoder
+
+                    _ ->
+                        Decode.fail "a manifest needs an [application] table or a [package] table"
+            )
+
+
+{-| Refuse a key a table does not have, naming it. A misspelt key is otherwise
+a setting silently left at its default.
+-}
+onlyKeys : Array String -> Decoder {}
+onlyKeys allowed =
+    Decode.table
+        |> Decode.andThen
+            (\table ->
+                when Array.findFirst (\key -> not (Array.member key allowed)) (Toml.Table.keys table) is
+                    Just { value = key } ->
+                        Decode.fail
+                            ("\""
+                                ++ key
+                                ++ "\" is not a key here; the keys are "
+                                ++ String.join ", " allowed
+                            )
 
                     Nothing ->
-                        Task.fail FromPathInvalidString
+                        Decode.succeed {}
             )
+
+
+appDecoder : Decoder AppOutline
+appDecoder =
+    Decode.succeed
+        (\{} application dependencies sources ->
+            { platform = application.platform
+            , sourceDirectories = application.sourceDirectories
+            , gengVersion = application.gengVersion
+            , dependencies = dependencies
+            , sources = sources
+            }
+        )
+        |> Decode.andMap (onlyKeys [ "application", "dependencies", "sources" ])
+        |> Decode.andMap (Decode.field "application" applicationTableDecoder)
+        |> Decode.andMap dependenciesTableDecoder
+        |> Decode.andMap sourcesTableDecoder
+
+
+applicationTableDecoder : Decoder { platform : Platform, sourceDirectories : Array Path, gengVersion : SemanticVersionRange }
+applicationTableDecoder =
+    Decode.succeed
+        (\{} gengVersion platform {} sourceDirectories ->
+            { platform = platform
+            , sourceDirectories = Maybe.withDefault [ Path.fromPosixString "src" ] sourceDirectories
+            , gengVersion = gengVersion
+            }
+        )
+        |> Decode.andMap (onlyKeys [ "geng", "runtime", "target", "source-directories" ])
+        |> Decode.andMap (Decode.field "geng" rangeDecoder)
+        |> Decode.andMap (Decode.field "runtime" runtimeDecoder)
+        |> Decode.andMap (targetDecoder [ "js", "beam", "native", "wasm" ])
+        |> Decode.andMap (Decode.optionalField "source-directories" (Decode.array srcDirDecoder))
+
+
+pkgDecoder : Decoder PkgOutline
+pkgDecoder =
+    Decode.succeed
+        (\{} package platform exposed dependencies sources ->
+            { platform = platform
+            , name = package.name
+            , summary = package.summary
+            , license = package.license
+            , version = package.version
+            , exposedModules = exposed
+            , gengVersion = package.gengVersion
+            , dependencies = dependencies
+            , sources = sources
+            }
+        )
+        |> Decode.andMap (onlyKeys [ "package", "platform", "modules", "dependencies", "sources" ])
+        |> Decode.andMap (Decode.field "package" packageTableDecoder)
+        |> Decode.andMap (Decode.field "platform" platformTableDecoder)
+        |> Decode.andMap (Decode.at [ "modules", "exposed" ] exposedDecoder)
+        |> Decode.andMap dependenciesTableDecoder
+        |> Decode.andMap sourcesTableDecoder
+
+
+packageTableDecoder :
+    Decoder
+        { name : PackageName
+        , summary : String
+        , license : License
+        , version : SemanticVersion
+        , gengVersion : SemanticVersionRange
+        }
+packageTableDecoder =
+    Decode.succeed
+        (\{} name version summary license gengVersion ->
+            { name = name
+            , summary = Maybe.withDefault "" summary
+            , license = license
+            , version = version
+            , gengVersion = gengVersion
+            }
+        )
+        |> Decode.andMap (onlyKeys [ "name", "version", "summary", "license", "geng" ])
+        |> Decode.andMap (Decode.field "name" packageNameDecoder)
+        |> Decode.andMap (Decode.field "version" versionDecoder)
+        |> Decode.andMap (Decode.optionalField "summary" Decode.string)
+        |> Decode.andMap (Decode.field "license" licenseDecoder)
+        |> Decode.andMap (Decode.field "geng" rangeDecoder)
+
+
+platformTableDecoder : Decoder Platform
+platformTableDecoder =
+    Decode.succeed (\{} runtime {} -> runtime)
+        |> Decode.andMap (onlyKeys [ "runtime", "target" ])
+        |> Decode.andMap (Decode.field "runtime" runtimeDecoder)
+        |> Decode.andMap (targetDecoder [ "any", "js", "beam", "native", "wasm" ])
+
+
+{-| A runtime from D24's hierarchy. The compiler builds for three of them, which
+are the platforms it had before it had the hierarchy: `any` is what `common`
+was.
+-}
+runtimeDecoder : Decoder Platform
+runtimeDecoder =
+    Decode.string
+        |> Decode.andThen
+            (\value ->
+                when value is
+                    "any" ->
+                        Decode.succeed Platform.Common
+
+                    "browser" ->
+                        Decode.succeed Platform.Browser
+
+                    "node" ->
+                        Decode.succeed Platform.Node
+
+                    _ ->
+                        if Array.member value [ "beam", "os", "linux", "darwin", "windows", "host" ] then
+                            Decode.fail ("the runtime \"" ++ value ++ "\" is not one this compiler builds for; it builds for any, browser and node")
+
+                        else
+                            Decode.fail ("\"" ++ value ++ "\" is not a runtime; the runtimes are any, browser, node, beam, os, linux, darwin, windows and host")
+            )
+
+
+{-| `target` is read so a manifest that writes it is not refused. Nothing checks
+it against the externs yet.
+-}
+targetDecoder : Array String -> Decoder {}
+targetDecoder allowed =
+    Decode.optionalField "target" Decode.string
+        |> Decode.andThen
+            (\maybeTarget ->
+                when maybeTarget is
+                    Nothing ->
+                        Decode.succeed {}
+
+                    Just target ->
+                        if Array.member target allowed then
+                            Decode.succeed {}
+
+                        else
+                            Decode.field "target"
+                                (Decode.fail ("\"" ++ target ++ "\" is not a target here; the targets are " ++ String.join ", " allowed))
+            )
+
+
+dependenciesTableDecoder : Decoder (Dict String SemanticVersionRange)
+dependenciesTableDecoder =
+    Decode.optionalField "dependencies" dependenciesDecoder
+        |> Decode.map (Maybe.withDefault Dict.empty)
+
+
+{-| A dependency table, whose every key has to be a package identifier and every
+value a range.
+-}
+dependenciesDecoder : Decoder (Dict String SemanticVersionRange)
+dependenciesDecoder =
+    Decode.dict rangeDecoder
+        |> Decode.andThen
+            (\deps ->
+                when Array.findFirst (\key -> PackageName.fromString key == Nothing) (Dict.keys deps) is
+                    Just { value = badKey } ->
+                        Decode.fail ("\"" ++ badKey ++ "\" is not a package identifier")
+
+                    Nothing ->
+                        Decode.succeed deps
+            )
+
+
+sourcesTableDecoder : Decoder (Dict String Source)
+sourcesTableDecoder =
+    Decode.optionalField "sources" sourcesDecoder
+        |> Decode.map (Maybe.withDefault Dict.empty)
+
+
+type RawSource
+    = RawUrl String
+    | RawPath String
+    | RawCommit { url : String, rev : String }
+
+
+sourcesDecoder : Decoder (Dict String Source)
+sourcesDecoder =
+    Decode.dict
+        (Decode.oneOf
+            [ Decode.map RawUrl Decode.string
+            , Decode.succeed (\{} path -> RawPath path)
+                |> Decode.andMap (onlyKeys [ "path" ])
+                |> Decode.andMap (Decode.field "path" Decode.string)
+            , Decode.succeed (\{} url rev -> RawCommit { url = url, rev = rev })
+                |> Decode.andMap (onlyKeys [ "git", "rev" ])
+                |> Decode.andMap (Decode.field "git" Decode.string)
+                |> Decode.andMap (Decode.field "rev" Decode.string)
+            ]
+        )
+        |> Decode.andThen
+            (\raw ->
+                Dict.foldl
+                    (\key value acc ->
+                        Decode.andThen
+                            (\done ->
+                                when sourceFromRaw key value is
+                                    Ok source ->
+                                        Decode.succeed (Dict.set key source done)
+
+                                    Err message ->
+                                        Decode.field key (Decode.fail message)
+                            )
+                            acc
+                    )
+                    (Decode.succeed Dict.empty)
+                    raw
+            )
+
+
+sourceFromRaw : String -> RawSource -> Result String Source
+sourceFromRaw key raw =
+    let
+        endsInSlash =
+            String.endsWith "/" key
+
+        prefix =
+            if endsInSlash then
+                String.dropLast 1 key
+
+            else
+                key
+    in
+    if prefix == "core" then
+        Err "core comes with the compiler, and nothing can say where else to find it"
+
+    else if not (PackageName.isPrefix prefix) then
+        Err "a source's key is a host, or a host and the path elements that begin some identifiers"
+
+    else
+        when raw is
+            RawUrl url ->
+                if endsInSlash then
+                    if String.endsWith "/" url then
+                        Ok (Rewrite url)
+
+                    else
+                        Err "a key that ends in a slash rewrites a prefix of URLs, so its value has to end in a slash too"
+
+                else
+                    Ok (Repository url)
+
+            RawPath path ->
+                if path == "" then
+                    Err "a path source needs a directory"
+
+                else
+                    Ok (LocalPath (Path.fromPosixString path))
+
+            RawCommit commit ->
+                if endsInSlash then
+                    Err "a git source names one repository, so its key cannot end in a slash"
+
+                else if String.count commit.rev < 7 || not (String.all Char.isHexDigit commit.rev) then
+                    Err "a git source's rev is a commit hash, at least seven hexadecimal digits"
+
+                else
+                    Ok (Commit commit)
+
+
+srcDirDecoder : Decoder Path
+srcDirDecoder =
+    Decode.string
+        |> Decode.map Path.fromPosixString
+        |> Decode.andThen
+            (\path ->
+                if path.root == "" then
+                    Decode.succeed path
+
+                else
+                    Decode.fail ("a source directory is relative to the manifest, and " ++ Path.toPosixString path ++ " is absolute")
+            )
+
+
+exposedDecoder : Decoder Exposed
+exposedDecoder =
+    Decode.oneOf
+        [ Decode.array moduleNameDecoder
+            |> Decode.map ExposedArray
+        , Decode.dict (Decode.array moduleNameDecoder)
+            |> Decode.map ExposedDict
+        ]
+
+
+moduleNameDecoder : Decoder ModuleName
+moduleNameDecoder =
+    fromStringDecoder "a module name" ModuleName.fromString
+
+
+packageNameDecoder : Decoder PackageName
+packageNameDecoder =
+    fromStringDecoder "a package identifier" PackageName.fromString
+
+
+versionDecoder : Decoder SemanticVersion
+versionDecoder =
+    fromStringDecoder "a version, like 1.0.0," SemanticVersion.fromString
+
+
+rangeDecoder : Decoder SemanticVersionRange
+rangeDecoder =
+    fromStringDecoder "a version range, like 1.0.0 <= v < 2.0.0," SemanticVersionRange.fromString
+
+
+licenseDecoder : Decoder License
+licenseDecoder =
+    fromStringDecoder "an OSI approved SPDX license identifier" License.fromString
+
+
+fromStringDecoder : String -> (String -> Maybe a) -> Decoder a
+fromStringDecoder what parse =
+    Decode.string
+        |> Decode.andThen
+            (\value ->
+                when parse value is
+                    Just parsed ->
+                        Decode.succeed parsed
+
+                    Nothing ->
+                        Decode.fail ("\"" ++ value ++ "\" is not " ++ what)
+            )
+
+
+-- SOURCE FILES
 
 
 {-| The types of errors  that can occur when retrieving the source code of a project.
@@ -277,150 +736,179 @@ readSourceFile fsPerm { absolute, relative } =
             )
 
 
-{-| JSON Decoder for [Outline](#Outline).
+-- WRITING
+
+
+{-| A new `geng.toml` for an outline, as `geng init` writes one. `[sources]` is
+left out: a new project has none.
 -}
-jsonDecoder : Decoder Outline
-jsonDecoder =
-    Decode.field "type" Decode.string    
-        |> Decode.andThen
-            (\type_ ->
-                when type_ is
-                    "application" -> Decode.map App appDecoder
-                    "package" -> Decode.map Pkg pkgDecoder
-                    _ ->
-                        Decode.fail ("Unknown gren.json type: " ++ type_)
-            )
+toToml : Outline -> String
+toToml outline =
+    let
+        line key value =
+            key ++ " = " ++ value ++ "\n"
+
+        dependencies deps =
+            "\n[dependencies]\n"
+                ++ (Dict.foldl
+                        (\name range acc -> acc ++ line (quote name) (quote (SemanticVersionRange.toString range)))
+                        ""
+                        deps
+                   )
+
+        runtime platform =
+            quote <|
+                when platform is
+                    Platform.Common ->
+                        "any"
+
+                    Platform.Browser ->
+                        "browser"
+
+                    Platform.Node ->
+                        "node"
+
+        stringArray values =
+            "[" ++ String.join ", " (Array.map quote values) ++ "]"
+    in
+    when outline is
+        App app ->
+            "[application]\n"
+                ++ line "geng" (quote (SemanticVersionRange.toString app.gengVersion))
+                ++ line "runtime" (runtime app.platform)
+                ++ line "source-directories" (stringArray (Array.map Path.toPosixString app.sourceDirectories))
+                ++ dependencies app.dependencies
+
+        Pkg pkg ->
+            "[package]\n"
+                ++ line "name" (quote (PackageName.toString pkg.name))
+                ++ line "version" (quote (SemanticVersion.toString pkg.version))
+                ++ line "summary" (quote pkg.summary)
+                ++ line "license" (quote (License.toString pkg.license))
+                ++ line "geng" (quote (SemanticVersionRange.toString pkg.gengVersion))
+                ++ "\n[platform]\n"
+                ++ line "runtime" (runtime pkg.platform)
+                ++ "\n[modules]\n"
+                ++ (when pkg.exposedModules is
+                        ExposedArray names ->
+                            line "exposed" (stringArray (Array.map ModuleName.toString names))
+
+                        ExposedDict groups ->
+                            Dict.foldl
+                                (\group names acc -> acc ++ line (quote group) (stringArray (Array.map ModuleName.toString names)))
+                                "\n[modules.exposed]\n"
+                                groups
+                   )
+                ++ dependencies pkg.dependencies
 
 
-{-| JSON Decoder for [PkgOutline](#PkgOutline).
+{-| A TOML basic string.
 -}
-pkgJsonDecoder : Decoder PkgOutline
-pkgJsonDecoder =
-    jsonDecoder
-        |> Decode.andThen
-            (\outline ->
-                when outline is
-                    Pkg pkgOutline ->
-                        Decode.succeed pkgOutline
+quote : String -> String
+quote value =
+    let
+        escape char =
+            when char is
+                '"' ->
+                    "\\\""
 
-                    App _ ->
-                        Decode.fail "Expected package outline, but decoded an application outline."
-            )
+                '\\' ->
+                    "\\\\"
 
+                '\n' ->
+                    "\\n"
 
-appDecoder : Decoder AppOutline
-appDecoder =
-    Decode.map4
-        (\platform srcDirs grenVersion deps ->
-            { platform = platform
-            , sourceDirectories = srcDirs
-            , grenVersion = grenVersion
-            , dependencies = deps
-            }
-        )
-        (Decode.field "platform" Platform.jsonDecoder)
-        (Decode.field "source-directories" (Decode.array srcDirDecoder))
-        (Decode.field "gren-version" SemanticVersion.jsonDecoder)
-        (Decode.field "dependencies" appDependenciesDecoder)
+                '\t' ->
+                    "\\t"
 
+                '\r' ->
+                    "\\r"
 
-srcDirDecoder : Decoder Path
-srcDirDecoder =
-    Decode.string
-        |> Decode.map Path.fromPosixString
-        |> Decode.andThen
-            (\path ->
-                if path.root == "" then
-                    Decode.succeed path
-
-                else
-                    Decode.fail ("Path needs to be relative, not absolute: " ++ Path.toPosixString path)
-            )
-
-
-appDependenciesDecoder : Decoder { direct : Dict String (VersionConstraint SemanticVersion), indirect : Dict String (VersionConstraint SemanticVersion) }
-appDependenciesDecoder =
-    Decode.map2
-        (\direct indirect ->
-            { direct = direct
-            , indirect = indirect
-            }
-        )
-        (Decode.field "direct" (dependenciesDecoder SemanticVersion.jsonDecoder))
-        (Decode.field "indirect" (dependenciesDecoder SemanticVersion.jsonDecoder))
-
-
-appDependenciesEncoder : Dict String (VersionConstraint SemanticVersion) -> Encode.Value
-appDependenciesEncoder deps =
-    Encode.dict identity (constraintEncoder SemanticVersion.toJson) deps
-
-
-constraintDecoder : Decoder a -> Decoder (VersionConstraint a)
-constraintDecoder versionDecoder =
-    Decode.oneOf
-        [ Decode.map Version versionDecoder
-        , Decode.string
-            |> Decode.andThen
-                (\strValue ->
-                    if String.startsWith "local:" strValue then
-                        strValue
-                            |> String.dropFirst localPrefixLength
-                            |> Path.fromPosixString
-                            |> LocalPath
-                            |> Decode.succeed
+                _ ->
+                    if Char.toCode char < 0x20 || Char.toCode char == 0x7F then
+                        "\\u" ++ String.padLeft 4 '0' (hex (Char.toCode char))
 
                     else
-                        Decode.fail ("Not valid dependency constraint: " ++ strValue)
-                )
-        ]
+                        String.fromChar char
+
+        hex n =
+            String.fromChar (hexDigit (n // 16)) ++ String.fromChar (hexDigit (modBy 16 n))
+
+        hexDigit d =
+            String.toArray "0123456789ABCDEF"
+                |> Array.get d
+                |> Maybe.withDefault '0'
+    in
+    "\"" ++ String.foldl (\char acc -> acc ++ escape char) "" value ++ "\""
 
 
-localPrefixLength : Int
-localPrefixLength =
-    String.count "local:"
+{-| Set one dependency's range in the text of a `geng.toml`, leaving everything
+else in the file as it was written, comments included.
+-}
+setDependency : String -> SemanticVersionRange -> String -> Result String String
+setDependency name range text =
+    Toml.parse text
+        |> Result.mapError Toml.errorToString
+        |> Result.map
+            (\document ->
+                document
+                    |> Toml.Edit.set [ "dependencies", name ] (Toml.Edit.string (SemanticVersionRange.toString range))
+                    |> Toml.toString
+            )
 
 
-constraintEncoder : (a -> Encode.Value) -> VersionConstraint a -> Encode.Value
-constraintEncoder versionEncoder constraint =
-    when constraint is
-        Version vsn ->
-            versionEncoder vsn
+{-| Remove one dependency from the text of a `geng.toml`, leaving everything else
+as it was written.
+-}
+removeDependency : String -> String -> Result String String
+removeDependency name text =
+    Toml.parse text
+        |> Result.mapError Toml.errorToString
+        |> Result.map
+            (\document ->
+                document
+                    |> Toml.Edit.remove [ "dependencies", name ]
+                    |> Toml.toString
+            )
 
-        LocalPath path ->
-            Encode.string ("local:" ++ Path.toPosixString path)
+
+-- JSON
 
 
-pkgDecoder : Decoder PkgOutline
-pkgDecoder =
-    Decode.map8
-        (\platform name summary license version exposedModules grenVersion dependencies ->
+{-| JSON Decoder for the [PkgOutline](#PkgOutline) in a package bundle.
+-}
+pkgJsonDecoder : Json.Decode.Decoder PkgOutline
+pkgJsonDecoder =
+    Json.Decode.map8
+        (\platform name summary license version exposedModules gengVersion dependencies ->
             { platform = platform
             , name = name
             , summary = summary
             , license = license
             , version = version
             , exposedModules = exposedModules
-            , grenVersion = grenVersion
+            , gengVersion = gengVersion
             , dependencies = dependencies
+            , sources = Dict.empty
             }
         )
-        (Decode.field "platform" Platform.jsonDecoder)
-        (Decode.field "name" PackageName.jsonDecoder)
-        (Decode.field "summary" Decode.string)
-        (Decode.field "license" License.jsonDecoder)
-        (Decode.field "version" SemanticVersion.jsonDecoder)
-        (Decode.field "exposed-modules" exposedModulesDecoder)
-        (Decode.field "gren-version" SemanticVersionRange.jsonDecoder)
-        (Decode.field "dependencies" pkgDependenciesDecoder)
+        (Json.Decode.field "platform" Platform.jsonDecoder)
+        (Json.Decode.field "name" PackageName.jsonDecoder)
+        (Json.Decode.field "summary" Json.Decode.string)
+        (Json.Decode.field "license" License.jsonDecoder)
+        (Json.Decode.field "version" SemanticVersion.jsonDecoder)
+        (Json.Decode.field "exposed-modules" exposedModulesJsonDecoder)
+        (Json.Decode.field "gren-version" SemanticVersionRange.jsonDecoder)
+        (Json.Decode.field "dependencies" (Json.Decode.dict SemanticVersionRange.jsonDecoder))
 
 
-exposedModulesDecoder : Decoder Exposed
-exposedModulesDecoder =
-    Decode.oneOf
-        [ Decode.array ModuleName.jsonDecoder
-            |> Decode.map ExposedArray
-        , Decode.dict (Decode.array ModuleName.jsonDecoder)
-            |> Decode.map ExposedDict
+exposedModulesJsonDecoder : Json.Decode.Decoder Exposed
+exposedModulesJsonDecoder =
+    Json.Decode.oneOf
+        [ Json.Decode.array ModuleName.jsonDecoder
+            |> Json.Decode.map ExposedArray
+        , Json.Decode.dict (Json.Decode.array ModuleName.jsonDecoder)
+            |> Json.Decode.map ExposedDict
         ]
 
 
@@ -434,54 +922,32 @@ exposedModulesEncoder exposed =
             Encode.dict identity (Encode.array ModuleName.toJson) dictOfNames
 
 
-pkgDependenciesDecoder : Decoder (Dict String (VersionConstraint SemanticVersionRange))
-pkgDependenciesDecoder =
-    dependenciesDecoder SemanticVersionRange.jsonDecoder
+{-| The outline as JSON, for the backend and for a package bundle.
 
-
-{-| A dependency table, whose every key has to be a package identifier.
-
-The table stays keyed by `String`, as every reader of it expects. What changes
-is that a key which is not an identifier is refused here, naming it, rather than
-turning into `PackageName.example` in whichever reader parses it later. Gren's
-`author/name` keys are the likeliest such key, and a manifest written for Gren
-is not one Geng reads (D23).
+The shape is `gren.json`'s, which is what the backend decodes, and nothing in it
+is read by a person. An application's dependencies there are the versions
+chosen for them, so the chosen versions are passed in: the ones the application
+lists become `direct` and the rest `indirect`. A package's are its ranges, and
+it ignores the versions.
 -}
-dependenciesDecoder : Decoder a -> Decoder (Dict String (VersionConstraint a))
-dependenciesDecoder versionDecoder =
-    Decode.dict (constraintDecoder versionDecoder)
-        |> Decode.andThen
-            (\deps ->
-                when Array.findFirst (\key -> PackageName.fromString key == Nothing) (Dict.keys deps) is
-                    Just { value = badKey } ->
-                        Decode.fail ("Not a valid package identifier: " ++ badKey)
-
-                    Nothing ->
-                        Decode.succeed deps
-            )
-
-
-pkgDependenciesEncoder : Dict String (VersionConstraint SemanticVersionRange) -> Encode.Value
-pkgDependenciesEncoder deps =
-    Encode.dict identity (constraintEncoder SemanticVersionRange.toJson) deps
-
-
-{-| JSON Encoder for [Outline](#Outline).
--}
-toJson : Outline -> Encode.Value
-toJson outline =
+toJson : Dict String SemanticVersion -> Outline -> Encode.Value
+toJson chosen outline =
     when outline is
         App app ->
+            let
+                encodeChosen deps =
+                    Encode.dict identity SemanticVersion.toJson deps
+            in
             Encode.object
                 [ { key = "type", value = Encode.string "application" }
                 , { key = "platform", value = Platform.toJson app.platform }
                 , { key = "source-directories", value = Encode.array (Encode.string << Path.toPosixString) app.sourceDirectories }
-                , { key = "gren-version", value = SemanticVersion.toJson app.grenVersion }
+                , { key = "gren-version", value = SemanticVersion.toJson (SemanticVersionRange.lowerBound app.gengVersion) }
                 , { key = "dependencies"
                   , value =
                     Encode.object
-                        [ { key = "direct", value = appDependenciesEncoder app.dependencies.direct }
-                        , { key = "indirect", value = appDependenciesEncoder app.dependencies.indirect }
+                        [ { key = "direct", value = encodeChosen (Dict.keepIf (\name _ -> Dict.member name app.dependencies) chosen) }
+                        , { key = "indirect", value = encodeChosen (Dict.keepIf (\name _ -> not (Dict.member name app.dependencies)) chosen) }
                         ]
                   }
                 ]
@@ -495,6 +961,6 @@ toJson outline =
                 , { key = "license", value = License.toJson pkg.license }
                 , { key = "version", value = SemanticVersion.toJson pkg.version }
                 , { key = "exposed-modules", value = exposedModulesEncoder pkg.exposedModules }
-                , { key = "gren-version", value = SemanticVersionRange.toJson pkg.grenVersion }
-                , { key = "dependencies", value = pkgDependenciesEncoder pkg.dependencies }
+                , { key = "gren-version", value = SemanticVersionRange.toJson pkg.gengVersion }
+                , { key = "dependencies", value = Encode.dict identity SemanticVersionRange.toJson pkg.dependencies }
                 ]

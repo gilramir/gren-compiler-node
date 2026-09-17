@@ -1,0 +1,260 @@
+module Compiler.Lock exposing
+    ( Lock
+    , Entry
+    , Origin (..)
+    , fileName
+    , empty
+    , decode
+    , encode
+    , find
+    )
+
+
+{-| `geng.lock`: the versions a project was built with, and where each came from
+(Geng's `packaging.md` K8 and K9).
+
+    # Written by geng from geng.toml. ...
+    lock-version = 1
+
+    [[package]]
+    name = "github.com/x/y"
+    version = "1.2.0"
+    repository = "github.com/x/y"
+    commit = "5f0c…"
+
+    [[package]]
+    name = "github.com/geng-language/url"
+    version = "6.0.0"
+    path = "../packages/url"
+
+Versions are chosen from the manifests alone, by minimal version selection, so
+the lock file does not decide anything. It is a record of the choice and the
+witness to it. There is no registry to ask what a tag named when it was first
+used, so the lock file keeps the commit, and a tag that names a different commit
+later is refused rather than followed. It keeps the repository root too, so the
+root is probed for once, when the package is added.
+
+`[[package]]` is every package the project is built with. `[[read]]` is every
+version whose manifest was read to choose them and that was not chosen, since
+its requirements are part of the choice and its commit has to be witnessed as
+much as a chosen one's.
+
+@docs Lock, Entry, Origin, fileName, empty, decode, encode, find
+-}
+
+import Compiler.PackageName as PackageName exposing (PackageName)
+import FileSystem.Path as Path exposing (Path)
+import SemanticVersion exposing (SemanticVersion)
+import Toml.Decode as Decode exposing (Decoder)
+import Toml.Table
+
+
+{-| The two lists a lock file holds, each in order of name and then version.
+-}
+type alias Lock =
+    { packages : Array Entry
+    , read : Array Entry
+    }
+
+
+{-| One version of one package.
+-}
+type alias Entry =
+    { name : PackageName
+    , version : SemanticVersion
+    , origin : Origin
+    }
+
+
+{-| Where a version came from. `Hosted` is a repository and the commit its tag
+named, `Local` a directory, relative to the project, that a `[sources]` path
+entry named, and `Pinned` a repository and the commit a `[sources]` git entry
+named, with no tag involved.
+-}
+type Origin
+    = Hosted { repository : String, commit : String }
+    | Local Path
+    | Pinned { repository : String, commit : String }
+
+
+{-| `geng.lock`
+-}
+fileName : String
+fileName =
+    "geng.lock"
+
+
+{-|-}
+empty : Lock
+empty =
+    { packages = [], read = [] }
+
+
+{-| The entry for one version of one package, looked for in both lists.
+-}
+find : PackageName -> SemanticVersion -> Lock -> Maybe Entry
+find name version lock =
+    Array.findFirst
+        (\entry -> entry.name == name && entry.version == version)
+        (lock.packages ++ lock.read)
+        |> Maybe.map .value
+
+
+{-| Read a lock file's text.
+-}
+decode : String -> Result String Lock
+decode text =
+    Decode.fromString lockDecoder text
+        |> Result.mapError Decode.errorToString
+
+
+lockDecoder : Decoder Lock
+lockDecoder =
+    Decode.succeed (\{} {} packages read -> { packages = packages, read = read })
+        |> Decode.andMap (onlyKeys [ "lock-version", "package", "read" ])
+        |> Decode.andMap
+            (Decode.field "lock-version" Decode.int
+                |> Decode.andThen
+                    (\version ->
+                        if version == 1 then
+                            Decode.succeed {}
+
+                        else
+                            Decode.fail ("this compiler reads lock-version 1, and this file is lock-version " ++ String.fromInt version)
+                    )
+            )
+        |> Decode.andMap (Decode.optionalField "package" (Decode.array entryDecoder) |> Decode.map (Maybe.withDefault []))
+        |> Decode.andMap (Decode.optionalField "read" (Decode.array entryDecoder) |> Decode.map (Maybe.withDefault []))
+
+
+entryDecoder : Decoder Entry
+entryDecoder =
+    Decode.succeed
+        (\{} name version repository commit path pinned ->
+            { name = name
+            , version = version
+            , origin =
+                when { repository = repository, commit = commit, path = path, pinned = pinned } is
+                    { path = Just p } ->
+                        Local (Path.fromPosixString p)
+
+                    { repository = Just r, commit = Just c, pinned = Just True } ->
+                        Pinned { repository = r, commit = c }
+
+                    { repository = Just r, commit = Just c } ->
+                        Hosted { repository = r, commit = c }
+
+                    _ ->
+                        Local Path.empty
+            }
+        )
+        |> Decode.andMap
+            (onlyKeys [ "name", "version", "repository", "commit", "path", "pinned" ]
+                |> Decode.andThen
+                    (\{} ->
+                        Decode.table
+                            |> Decode.andThen
+                                (\table ->
+                                    let
+                                        has key =
+                                            Toml.Table.member key table
+                                    in
+                                    if has "path" && not (has "repository") && not (has "commit") then
+                                        Decode.succeed {}
+
+                                    else if has "repository" && has "commit" && not (has "path") then
+                                        Decode.succeed {}
+
+                                    else
+                                        Decode.fail "an entry has a path, or a repository and a commit"
+                                )
+                    )
+            )
+        |> Decode.andMap (Decode.field "name" (fromString "a package identifier" PackageName.fromString))
+        |> Decode.andMap (Decode.field "version" (fromString "a version" SemanticVersion.fromString))
+        |> Decode.andMap (Decode.optionalField "repository" Decode.string)
+        |> Decode.andMap (Decode.optionalField "commit" Decode.string)
+        |> Decode.andMap (Decode.optionalField "path" Decode.string)
+        |> Decode.andMap (Decode.optionalField "pinned" Decode.bool)
+
+
+onlyKeys : Array String -> Decoder {}
+onlyKeys allowed =
+    Decode.table
+        |> Decode.andThen
+            (\table ->
+                when Array.findFirst (\key -> not (Array.member key allowed)) (Toml.Table.keys table) is
+                    Just { value = key } ->
+                        Decode.fail ("\"" ++ key ++ "\" is not a key a lock file has")
+
+                    Nothing ->
+                        Decode.succeed {}
+            )
+
+
+fromString : String -> (String -> Maybe a) -> Decoder a
+fromString what parse =
+    Decode.string
+        |> Decode.andThen
+            (\value ->
+                when parse value is
+                    Just parsed ->
+                        Decode.succeed parsed
+
+                    Nothing ->
+                        Decode.fail ("\"" ++ value ++ "\" is not " ++ what)
+            )
+
+
+{-| A lock file's text. The same lock is always the same text: entries are
+sorted, and nothing in it depends on when or where it was written.
+-}
+encode : Lock -> String
+encode lock =
+    let
+        sorted entries =
+            Array.sortWith
+                (\a b ->
+                    when compare (PackageName.toString a.name) (PackageName.toString b.name) is
+                        EQ ->
+                            SemanticVersion.compare a.version b.version
+
+                        order ->
+                            order
+                )
+                entries
+
+        quote value =
+            "\"" ++ value ++ "\""
+
+        entryText table entry =
+            "\n[["
+                ++ table
+                ++ "]]\n"
+                ++ "name = "
+                ++ quote (PackageName.toString entry.name)
+                ++ "\nversion = "
+                ++ quote (SemanticVersion.toString entry.version)
+                ++ "\n"
+                ++ (when entry.origin is
+                        Hosted { repository, commit } ->
+                            "repository = " ++ quote repository ++ "\ncommit = " ++ quote commit ++ "\n"
+
+                        Pinned { repository, commit } ->
+                            "repository = " ++ quote repository ++ "\ncommit = " ++ quote commit ++ "\npinned = true\n"
+
+                        Local path ->
+                            "path = " ++ quote (escape (Path.toPosixString path)) ++ "\n"
+                   )
+
+        escape value =
+            value
+                |> String.replace "\\" "\\\\"
+                |> String.replace "\"" "\\\""
+    in
+    "# Written by geng from geng.toml: the version of each package this project is\n"
+        ++ "# built with, and the commit its tag named when it was chosen. A tag that\n"
+        ++ "# names another commit later is refused. Commit this file for an application.\n"
+        ++ "lock-version = 1\n"
+        ++ String.join "" (Array.map (entryText "package") (sorted lock.packages))
+        ++ String.join "" (Array.map (entryText "read") (sorted lock.read))
