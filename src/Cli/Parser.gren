@@ -1085,7 +1085,7 @@ semanticVersionParser =
     }
 
 
-{-| For `PackageName`, like `gren-lang/core`.
+{-| For `PackageName`, like `github.com/geng-language/node`.
 -}
 packageNameParser : ValueParser PackageName
 packageNameParser =
@@ -1093,7 +1093,7 @@ packageNameParser =
     , plural = "packages"
     , fn = PackageName.fromString
     , examples =
-        [ "gren-lang/core"
-        , "robheghan/string-diff"
+        [ "github.com/geng-language/node"
+        , "gitlab.com/acme/tooling/argparse"
         ]
     }

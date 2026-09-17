@@ -65,7 +65,7 @@ type LoadFromPathError
 {-| Loads an entire package from disk. The provided `Path` needs to point to the root
 directory of the package (the directory containing `gren.json`).
 
-For core packages, like `gren-lang/core`, the sources might include JavaScript files.
+For `core`, and a package with externs, the sources might include JavaScript files.
 -}
 loadFromPath : FileSystem.Permission -> Path -> Task LoadFromPathError Package
 loadFromPath fsPermission path =

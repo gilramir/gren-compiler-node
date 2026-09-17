@@ -141,7 +141,7 @@ type FindSourceFilesError
 
 {-| Find the source files of a given project.
 
-When used on core packages, like `gren-lang/core`, this function can return JavaScript files.
+When used on `core`, or a package with externs, this function can return JavaScript files.
 -}
 findSourceFiles : FileSystem.Permission -> Outline -> Path -> Task FindSourceFilesError (Array { path : Path, moduleName : ModuleName, source : String })
 findSourceFiles fsPerm outline outlinePath =
@@ -346,8 +346,8 @@ appDependenciesDecoder =
             , indirect = indirect
             }
         )
-        (Decode.field "direct" (Decode.dict (constraintDecoder SemanticVersion.jsonDecoder)))
-        (Decode.field "indirect" (Decode.dict (constraintDecoder SemanticVersion.jsonDecoder)))
+        (Decode.field "direct" (dependenciesDecoder SemanticVersion.jsonDecoder))
+        (Decode.field "indirect" (dependenciesDecoder SemanticVersion.jsonDecoder))
 
 
 appDependenciesEncoder : Dict String (VersionConstraint SemanticVersion) -> Encode.Value
@@ -436,7 +436,29 @@ exposedModulesEncoder exposed =
 
 pkgDependenciesDecoder : Decoder (Dict String (VersionConstraint SemanticVersionRange))
 pkgDependenciesDecoder =
-    Decode.dict (constraintDecoder SemanticVersionRange.jsonDecoder)
+    dependenciesDecoder SemanticVersionRange.jsonDecoder
+
+
+{-| A dependency table, whose every key has to be a package identifier.
+
+The table stays keyed by `String`, as every reader of it expects. What changes
+is that a key which is not an identifier is refused here, naming it, rather than
+turning into `PackageName.example` in whichever reader parses it later. Gren's
+`author/name` keys are the likeliest such key, and a manifest written for Gren
+is not one Geng reads (D23).
+-}
+dependenciesDecoder : Decoder a -> Decoder (Dict String (VersionConstraint a))
+dependenciesDecoder versionDecoder =
+    Decode.dict (constraintDecoder versionDecoder)
+        |> Decode.andThen
+            (\deps ->
+                when Array.findFirst (\key -> PackageName.fromString key == Nothing) (Dict.keys deps) is
+                    Just { value = badKey } ->
+                        Decode.fail ("Not a valid package identifier: " ++ badKey)
+
+                    Nothing ->
+                        Decode.succeed deps
+            )
 
 
 pkgDependenciesEncoder : Dict String (VersionConstraint SemanticVersionRange) -> Encode.Value

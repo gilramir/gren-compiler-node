@@ -7,14 +7,13 @@
     "gren-version": "0.6.6",
     "dependencies": {
         "direct": {
-            "gren-lang/core": "local:../../core",
-            "geng/stream": "local:../../../../packages/stream",
-            "gren-lang/node": "local:../../node",
-            "gren-lang/compiler-node": "local:..",
-            "gren-lang/compiler-common": "local:../../compiler-common"
+            "github.com/geng-language/stream": "local:../../../../packages/stream",
+            "github.com/geng-language/node": "local:../../node",
+            "github.com/geng-language/compiler-node": "local:..",
+            "github.com/geng-language/compiler-common": "local:../../compiler-common"
         },
         "indirect": {
-            "gren-lang/url": "6.0.0"
+            "github.com/geng-language/url": "local:../../../../packages/url"
         }
     }
 }
