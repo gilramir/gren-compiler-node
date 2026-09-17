@@ -3,6 +3,7 @@ module Compiler.Outline exposing
     , AppOutline
     , PkgOutline
     , Exposed (..)
+    , PackageTarget (..)
     , Source (..)
     , fileName
     , defaultSummary
@@ -44,7 +45,7 @@ It was `gren.json`. The JSON shape survives as what the front end hands the
 backend and what a package bundle holds, since neither is a file anyone writes,
 and it is what [toJson](#toJson) and [pkgJsonDecoder](#pkgJsonDecoder) speak.
 
-@docs Outline, AppOutline, PkgOutline, Exposed, Source, fileName, defaultSummary
+@docs Outline, AppOutline, PkgOutline, Exposed, PackageTarget, Source, fileName, defaultSummary
 
 ## Read from disk
 
@@ -70,6 +71,7 @@ import Compiler.PackageName as PackageName exposing (PackageName)
 import Compiler.ModuleName as ModuleName exposing (ModuleName)
 import Compiler.License as License exposing (License)
 import Compiler.Platform as Platform exposing (Platform)
+import Compiler.Runtime as Runtime exposing (Runtime)
 import Dict exposing (Dict)
 import Task exposing (Task)
 import Toml
@@ -89,10 +91,12 @@ type Outline
 
 `gengVersion` is the range of compilers it builds with. `dependencies` are
 ranges, as a package's are: the versions chosen are the lock file's business,
-not the manifest's.
+not the manifest's. `platform` is its runtime, one of the three the compiler
+builds for, and `target` what it is built for, `js` unless it says otherwise.
 -}
 type alias AppOutline =
     { platform : Platform
+    , target : String
     , sourceDirectories : Array Path
     , gengVersion : SemanticVersionRange
     , dependencies : Dict String SemanticVersionRange
@@ -104,9 +108,15 @@ type alias AppOutline =
 
 A package may have `[sources]` too. They apply when the package is the project
 being built, and never when it is someone else's dependency (K9).
+
+Its `runtime` may be any of D24's, including those the compiler does not build
+for, which a build refuses when it needs the package (D319). Its `target` is
+what it declares, if it declares one; what its externs serve is derived by the
+backend and checked against it (D318).
 -}
 type alias PkgOutline =
-    { platform : Platform
+    { runtime : Runtime
+    , target : Maybe PackageTarget
     , name : PackageName
     , summary : String
     , license : License
@@ -116,6 +126,14 @@ type alias PkgOutline =
     , dependencies : Dict String SemanticVersionRange
     , sources : Dict String Source
     }
+
+
+{-| A package's declared `target`: `"any"`, or the targets its externs serve,
+such as `["js", "wasm"]`.
+-}
+type PackageTarget
+    = AnyTarget
+    | Targets (Array String)
 
 
 {-| Exposed modules in [PkgOutline](#PkgOutline). Modules that become available
@@ -270,6 +288,7 @@ appDecoder =
     Decode.succeed
         (\{} application dependencies sources ->
             { platform = application.platform
+            , target = application.target
             , sourceDirectories = application.sourceDirectories
             , gengVersion = application.gengVersion
             , dependencies = dependencies
@@ -282,11 +301,12 @@ appDecoder =
         |> Decode.andMap sourcesTableDecoder
 
 
-applicationTableDecoder : Decoder { platform : Platform, sourceDirectories : Array Path, gengVersion : SemanticVersionRange }
+applicationTableDecoder : Decoder { platform : Platform, target : String, sourceDirectories : Array Path, gengVersion : SemanticVersionRange }
 applicationTableDecoder =
     Decode.succeed
-        (\{} gengVersion platform {} sourceDirectories ->
+        (\{} gengVersion platform target sourceDirectories ->
             { platform = platform
+            , target = Maybe.withDefault "js" target
             , sourceDirectories = Maybe.withDefault [ Path.fromPosixString "src" ] sourceDirectories
             , gengVersion = gengVersion
             }
@@ -294,7 +314,7 @@ applicationTableDecoder =
         |> Decode.andMap (onlyKeys [ "geng", "runtime", "target", "source-directories" ])
         |> Decode.andMap (Decode.field "geng" rangeDecoder)
         |> Decode.andMap (Decode.field "runtime" runtimeDecoder)
-        |> Decode.andMap (targetDecoder [ "js", "beam", "native", "wasm" ])
+        |> Decode.andMap (Decode.optionalField "target" (Decode.string |> Decode.andThen oneTarget))
         |> Decode.andMap (Decode.optionalField "source-directories" (Decode.array srcDirDecoder))
 
 
@@ -302,7 +322,8 @@ pkgDecoder : Decoder PkgOutline
 pkgDecoder =
     Decode.succeed
         (\{} package platform exposed dependencies sources ->
-            { platform = platform
+            { runtime = platform.runtime
+            , target = platform.target
             , name = package.name
             , summary = package.summary
             , license = package.license
@@ -347,17 +368,16 @@ packageTableDecoder =
         |> Decode.andMap (Decode.field "geng" rangeDecoder)
 
 
-platformTableDecoder : Decoder Platform
+platformTableDecoder : Decoder { runtime : Runtime, target : Maybe PackageTarget }
 platformTableDecoder =
-    Decode.succeed (\{} runtime {} -> runtime)
+    Decode.succeed (\{} runtime target -> { runtime = runtime, target = target })
         |> Decode.andMap (onlyKeys [ "runtime", "target" ])
-        |> Decode.andMap (Decode.field "runtime" runtimeDecoder)
-        |> Decode.andMap (targetDecoder [ "any", "js", "beam", "native", "wasm" ])
+        |> Decode.andMap (Decode.field "runtime" packageRuntimeDecoder)
+        |> Decode.andMap (Decode.optionalField "target" packageTargetDecoder)
 
 
-{-| A runtime from D24's hierarchy. The compiler builds for three of them, which
-are the platforms it had before it had the hierarchy: `any` is what `common`
-was.
+{-| An application's runtime. The compiler builds for three of D24's, which are
+the platforms it had before it had the hierarchy: `any` is what `common` was.
 -}
 runtimeDecoder : Decoder Platform
 runtimeDecoder =
@@ -383,26 +403,74 @@ runtimeDecoder =
             )
 
 
-{-| `target` is read so a manifest that writes it is not refused. Nothing checks
-it against the externs yet.
+{-| A package's runtime, which may be any of D24's (D319). One the compiler does
+not build for is refused when a build needs the package, not here, so a package
+for `beam` or `os` can say so.
 -}
-targetDecoder : Array String -> Decoder {}
-targetDecoder allowed =
-    Decode.optionalField "target" Decode.string
+packageRuntimeDecoder : Decoder Runtime
+packageRuntimeDecoder =
+    Decode.string
         |> Decode.andThen
-            (\maybeTarget ->
-                when maybeTarget is
+            (\value ->
+                when Runtime.fromString value is
+                    Just runtime ->
+                        Decode.succeed runtime
+
                     Nothing ->
-                        Decode.succeed {}
-
-                    Just target ->
-                        if Array.member target allowed then
-                            Decode.succeed {}
-
-                        else
-                            Decode.field "target"
-                                (Decode.fail ("\"" ++ target ++ "\" is not a target here; the targets are " ++ String.join ", " allowed))
+                        Decode.fail ("\"" ++ value ++ "\" is not a runtime; the runtimes are any, browser, node, beam, os, linux, darwin, windows and host")
             )
+
+
+{-| The targets, D77's table's right-hand column.
+-}
+targets : Array String
+targets =
+    [ "beam", "js", "native", "wasm" ]
+
+
+oneTarget : String -> Decoder String
+oneTarget value =
+    if Array.member value targets then
+        Decode.succeed value
+
+    else
+        Decode.fail ("\"" ++ value ++ "\" is not a target; the targets are " ++ String.join ", " targets)
+
+
+{-| A package's `target`: `"any"`, or an array of targets, which the backend
+holds to what the package's externs serve (D50, D318). A single target is not a
+set, and `js` externs serve `wasm` as well, so it is refused with the form to
+write.
+-}
+packageTargetDecoder : Decoder PackageTarget
+packageTargetDecoder =
+    Decode.oneOf
+        [ Decode.string
+            |> Decode.andThen
+                (\value ->
+                    if value == "any" then
+                        Decode.succeed AnyTarget
+
+                    else
+                        Decode.fail ("a package's target is \"any\" or an array of targets, such as [\"" ++ value ++ "\"]")
+                )
+        , Decode.array (Decode.string |> Decode.andThen oneTarget)
+            |> Decode.andThen
+                (\values ->
+                    let
+                        sorted =
+                            Array.sort values
+                    in
+                    if Array.isEmpty values then
+                        Decode.fail "a package's target names at least one target; a package that builds for every target is \"any\""
+
+                    else if (Array.foldl (\value acc -> { previous = Just value, twice = acc.twice || acc.previous == Just value }) { previous = Nothing, twice = False } sorted).twice then
+                        Decode.fail "a target is named twice"
+
+                    else
+                        Decode.succeed (Targets sorted)
+                )
+        ]
 
 
 dependenciesTableDecoder : Decoder (Dict String SemanticVersionRange)
@@ -787,7 +855,7 @@ toToml outline =
                 ++ line "license" (quote (License.toString pkg.license))
                 ++ line "geng" (quote (SemanticVersionRange.toString pkg.gengVersion))
                 ++ "\n[platform]\n"
-                ++ line "runtime" (runtime pkg.platform)
+                ++ line "runtime" (quote (Runtime.toString pkg.runtime))
                 ++ "\n[modules]\n"
                 ++ (when pkg.exposedModules is
                         ExposedArray names ->
@@ -881,7 +949,8 @@ pkgJsonDecoder : Json.Decode.Decoder PkgOutline
 pkgJsonDecoder =
     Json.Decode.map8
         (\platform name summary license version exposedModules gengVersion dependencies ->
-            { platform = platform
+            { runtime = Runtime.fromPlatform platform
+            , target = Nothing
             , name = name
             , summary = summary
             , license = license
@@ -941,6 +1010,7 @@ toJson chosen outline =
             Encode.object
                 [ { key = "type", value = Encode.string "application" }
                 , { key = "platform", value = Platform.toJson app.platform }
+                , { key = "target", value = Encode.string app.target }
                 , { key = "source-directories", value = Encode.array (Encode.string << Path.toPosixString) app.sourceDirectories }
                 , { key = "gren-version", value = SemanticVersion.toJson (SemanticVersionRange.lowerBound app.gengVersion) }
                 , { key = "dependencies"
@@ -954,8 +1024,19 @@ toJson chosen outline =
 
         Pkg pkg ->
             Encode.object
-                [ { key = "type", value = Encode.string "package" }
-                , { key = "platform", value = Platform.toJson pkg.platform }
+                ([ { key = "type", value = Encode.string "package" }
+                -- A runtime the compiler does not build for goes by its own
+                -- name, which the backend refuses. PackageInstall has refused
+                -- it first, in a project and in each dependency (D319).
+                , { key = "platform"
+                  , value =
+                    when Runtime.toPlatform pkg.runtime is
+                        Just platform ->
+                            Platform.toJson platform
+
+                        Nothing ->
+                            Encode.string (Runtime.toString pkg.runtime)
+                  }
                 , { key = "name", value = PackageName.toJson pkg.name }
                 , { key = "summary", value = Encode.string pkg.summary }
                 , { key = "license", value = License.toJson pkg.license }
@@ -964,3 +1045,14 @@ toJson chosen outline =
                 , { key = "gren-version", value = SemanticVersionRange.toJson pkg.gengVersion }
                 , { key = "dependencies", value = Encode.dict identity SemanticVersionRange.toJson pkg.dependencies }
                 ]
+                    ++ (when pkg.target is
+                            Nothing ->
+                                []
+
+                            Just AnyTarget ->
+                                [ { key = "target", value = Encode.string "any" } ]
+
+                            Just (Targets names) ->
+                                [ { key = "target", value = Encode.array Encode.string names } ]
+                       )
+                )
