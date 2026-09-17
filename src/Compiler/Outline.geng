@@ -707,7 +707,7 @@ findSourceFilesHelp fsPerm local root =
                                         fullLocalPath =
                                             Path.append entry.path local
                                     in
-                                    if entry.path.extension == "gren" || isKernelCode fullLocalPath || isExternCode fullLocalPath then
+                                    if entry.path.extension == "geng" || isKernelCode fullLocalPath || isExternCode fullLocalPath then
                                         Just <|
                                             Task.succeed
                                                 [ { absolute = Path.append entry.path root

@@ -1047,25 +1047,25 @@ pathParser =
     }
 
 
-{-| Like [pathParser](#pathParser), but verifies that the file extension is `.gren`.
+{-| Like [pathParser](#pathParser), but verifies that the file extension is `.geng`.
 -}
 grenFileParser : ValueParser Path
 grenFileParser =
-    { singular = "gren-file"
-    , plural = "gren-files"
+    { singular = "geng-file"
+    , plural = "geng-files"
     , fn = \input ->
         pathParser.fn input
             |> Maybe.andThen
                 (\path ->
-                    if path.extension /= "gren" then
+                    if path.extension /= "geng" then
                         Nothing
                 
                     else
                         Just path
                 )
     , examples = 
-        [ "MyModule.gren"
-        , "src/Main.gren"
+        [ "MyModule.geng"
+        , "src/Main.geng"
         ]
     }
 
