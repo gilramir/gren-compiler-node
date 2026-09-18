@@ -76,7 +76,7 @@ tests =
             [ test "Args in valid example is parsed correctly" <| \{} ->
                 expectParseSuccess testCmd testArgs <| \cmd ->
                     Expect.equal
-                        [ Path.fromPosixString "src/Main.gren" ]
+                        [ Path.fromPosixString "src/Main.geng" ]
                         cmd.args
             , test "Fails if passed arg fails the parser" <| \{} ->
                 runCommand (cmdBuilder Parser.noArgs testFlags) [ "make", "src/Main" ]
@@ -84,8 +84,12 @@ tests =
                         (Parser.BadArguments <| Parser.ArgumentParserWrongArity { expected = 0, actual = 1})
             , test "Can map arg parser" <| \{} ->
                 let
+                    noStrings : a -> Array String
+                    noStrings _ =
+                        []
+
                     cmd =
-                        cmdBuilder (Parser.mapArgs (\_ -> []) Parser.noArgs) testFlags
+                        cmdBuilder (Parser.mapArgs noStrings Parser.noArgs) testFlags
                 in
                 expectParseSuccess cmd [ "make" ] <| \exec ->
                     Expect.equal [] exec.args
@@ -116,7 +120,16 @@ tests =
                 in
                 [ test "Passing one arg when one is expected" <| \{} ->
                     expectParseSuccess testCmdOneArg testArgs <| \cmd ->
-                        Expect.equal ( Path.fromPosixString "src/Main.gren" ) cmd.args
+                        Expect.equal ( Path.fromPosixString "src/Main.geng" ) cmd.args
+                , test "A .gren file is not a geng-file (m1b-manifest.md MF10)" <| \{} ->
+                    runCommand testCmdOneArg [ "make", "src/Main.gren" ]
+                        |> Expect.equal
+                            (Parser.BadArguments <| Parser.ArgumentParserInvalidArgument
+                                { argument = "src/Main.gren"
+                                , title = Parser.grenFileParser.singular
+                                , examples = Parser.grenFileParser.examples
+                                }
+                            )
                 , test "Passing no args when one is expected" <| \{} ->
                     runCommand testCmdOneArg [ "make" ]
                         |> Expect.equal
@@ -126,7 +139,7 @@ tests =
                                 }
                             )
                 , test "Passing multiple args when one is expected" <| \{} ->
-                    runCommand testCmdOneArg [ "make", "src/Main.gren", "Example.gren" ]
+                    runCommand testCmdOneArg [ "make", "src/Main.geng", "Example.geng" ]
                         |> Expect.equal 
                             (Parser.BadArguments <| Parser.ArgumentParserWrongArity 
                                 { expected = 1
@@ -146,11 +159,11 @@ tests =
                             testFlags
 
                     testTwoArgs =
-                        [ "make", "src/Dest", "src/MyMain.gren" ]
+                        [ "make", "src/Dest", "src/MyMain.geng" ]
 
                     validResult =
                         { path = Path.fromPosixString "src/Dest"
-                        , file = Path.fromPosixString "src/MyMain.gren"
+                        , file = Path.fromPosixString "src/MyMain.geng"
                         }
                 in
                 [ test "Valid example" <| \{} ->
@@ -182,7 +195,7 @@ tests =
                                 }
                             )
                 , test "Passing three args when two is expected" <| \{} ->
-                    runCommand testCmdTwoArgs [ "make", "src/Main.gren", "Example.gren", "Bah" ]
+                    runCommand testCmdTwoArgs [ "make", "src/Main.geng", "Example.geng", "Bah" ]
                         |> Expect.equal 
                             (Parser.BadArguments <| Parser.ArgumentParserWrongArity 
                                 { expected = 2
@@ -205,11 +218,11 @@ tests =
                             testFlags
 
                     testThreeArgs =
-                        [ "make", "src/Dest", "src/MyMain.gren", "test/Test" ]
+                        [ "make", "src/Dest", "src/MyMain.geng", "test/Test" ]
 
                     validResult =
                         { path = Path.fromPosixString "src/Dest"
-                        , file = Path.fromPosixString "src/MyMain.gren"
+                        , file = Path.fromPosixString "src/MyMain.geng"
                         , path2 = Path.fromPosixString "test/Test"
                         }
                 in
@@ -242,7 +255,7 @@ tests =
                                 }
                             )
                 , test "Passing two args when three is expected" <| \{} ->
-                    runCommand testCmdThreeArgs [ "make", "src/Main.gren", "Example.gren" ]
+                    runCommand testCmdThreeArgs [ "make", "src/Main.geng", "Example.geng" ]
                         |> Expect.equal 
                             (Parser.BadArguments <| Parser.ArgumentParserWrongArity 
                                 { expected = 3
@@ -263,10 +276,10 @@ tests =
                     expectParseSuccess testCmd [ "make" ] <| \cmd ->
                         Expect.equal [] cmd.args
                 , test "Multiple args" <| \{} ->
-                    expectParseSuccess testCmd [ "make", "src/Main.gren", "src/Logic.gren" ] <| \cmd ->
+                    expectParseSuccess testCmd [ "make", "src/Main.geng", "src/Logic.geng" ] <| \cmd ->
                         Expect.equal
-                            [ Path.fromPosixString "src/Main.gren"
-                            , Path.fromPosixString "src/Logic.gren"
+                            [ Path.fromPosixString "src/Main.geng"
+                            , Path.fromPosixString "src/Logic.geng"
                             ]
                             cmd.args                
                 ]
@@ -295,16 +308,16 @@ tests =
                         [ "make" ]
 
                     secondTest =
-                        [ "make", "out.txt", "src/Main.gren" ]
+                        [ "make", "out.txt", "src/Main.geng" ]
 
                     dashDashTest1 =
-                        [ "make", "--", "out.txt", "src/Main.gren" ]
+                        [ "make", "--", "out.txt", "src/Main.geng" ]
 
                     dashDashTest2 =
-                        [ "make", "out.txt", "--", "src/Main.gren" ]
+                        [ "make", "out.txt", "--", "src/Main.geng" ]
 
                     dashDashTest3 =
-                        [ "make", "out.txt", "src/Main.gren", "--" ]
+                        [ "make", "out.txt", "src/Main.geng", "--" ]
 
                     validFirstResult =
                         { path = Path.fromPosixString ""
@@ -313,7 +326,7 @@ tests =
                     
                     validSecondResult =
                         { path = Path.fromPosixString "out.txt"
-                        , file = Path.fromPosixString "src/Main.gren"
+                        , file = Path.fromPosixString "src/Main.geng"
                         }
                 in
                 [ test "Zero args is fine" <| \{} ->
@@ -489,12 +502,12 @@ stripFlagDescriptions error =
 
 testArgs : Array String
 testArgs =
-    [ "make", "--debug", "--output=out", "src/Main.gren" ]
+    [ "make", "--debug", "--output=out", "src/Main.geng" ]
 
 -- The --output flag and its values are in separate CLI arguments
 testArgsSplitFlagValue : Array String
 testArgsSplitFlagValue =
-    [ "make", "--debug", "--output", "out", "src/Main.gren" ]
+    [ "make", "--debug", "--output", "out", "src/Main.geng" ]
 
 testCmd =
     cmdBuilder testArgParser testFlags
@@ -524,7 +537,7 @@ cmdBuilder argParser flagParser =
     , summary =
         "Makey make make"
     , example =
-        PP.text "gren make src/Main.gren"
+        PP.text "geng make src/Main.geng"
     , builder =
         \args flags ->
             { args = args
