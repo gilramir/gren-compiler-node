@@ -235,11 +235,19 @@ type alias PackageDiffFlags =
     }
 
 
-{-|-}
+{-| `environment` is what the caller wants set in the backend's environment on
+top of this process's own, which is how a driver tells the backend something
+the JSON command has no field for. `GENG_STAGE_WRITE` is the one that matters:
+a build for a target whose backend is not in the binary stops at a stage and
+the driver takes it from there, and the stage switches are environment
+variables rather than command fields ("Core.Stage", geng-lang `m2-seam.md`
+§DS5).
+-}
 type alias RunOptions =
     { useColor : Bool
     , compilerPath : Path
     , pathToString : (Path -> String)
+    , environment : Dict String String
     }
 
 
@@ -264,7 +272,8 @@ run permission options =
         { ( ChildProcess.defaultSpawnOptions ChildProcess.External )
             | shell = NoShell
             , environmentVariables = 
-                ChildProcess.MergeWithEnvironmentVariables colorEnvVar
+                ChildProcess.MergeWithEnvironmentVariables
+                    (Dict.union options.environment colorEnvVar)
         }
 
 
