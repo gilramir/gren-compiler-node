@@ -1,6 +1,8 @@
 module Compiler.Outline exposing
     ( Outline (..)
     , AppOutline
+    , appPlatform
+    , runtimesFor
     , PkgOutline
     , Exposed (..)
     , PackageTarget (..)
@@ -45,7 +47,7 @@ It was `gren.json`. The JSON shape survives as what the front end hands the
 backend and what a package bundle holds, since neither is a file anyone writes,
 and it is what [toJson](#toJson) and [pkgJsonDecoder](#pkgJsonDecoder) speak.
 
-@docs Outline, AppOutline, PkgOutline, Exposed, PackageTarget, Source, fileName, defaultSummary
+@docs Outline, AppOutline, appPlatform, runtimesFor, PkgOutline, Exposed, PackageTarget, Source, fileName, defaultSummary
 
 ## Read from disk
 
@@ -91,11 +93,12 @@ type Outline
 
 `gengVersion` is the range of compilers it builds with. `dependencies` are
 ranges, as a package's are: the versions chosen are the lock file's business,
-not the manifest's. `platform` is its runtime, one of the three the compiler
-builds for, and `target` what it is built for, `js` unless it says otherwise.
+not the manifest's. `runtime` is one the compiler builds for and one its
+`target` reaches ([runtimesFor](#runtimesFor)), and `target` is what it is
+built for, `js` unless it says otherwise.
 -}
 type alias AppOutline =
-    { platform : Platform
+    { runtime : Runtime
     , target : String
     , sourceDirectories : Array Path
     , gengVersion : SemanticVersionRange
@@ -287,7 +290,7 @@ appDecoder : Decoder AppOutline
 appDecoder =
     Decode.succeed
         (\{} application dependencies sources ->
-            { platform = application.platform
+            { runtime = application.runtime
             , target = application.target
             , sourceDirectories = application.sourceDirectories
             , gengVersion = application.gengVersion
@@ -301,11 +304,11 @@ appDecoder =
         |> Decode.andMap sourcesTableDecoder
 
 
-applicationTableDecoder : Decoder { platform : Platform, target : String, sourceDirectories : Array Path, gengVersion : SemanticVersionRange }
+applicationTableDecoder : Decoder { runtime : Runtime, target : String, sourceDirectories : Array Path, gengVersion : SemanticVersionRange }
 applicationTableDecoder =
     Decode.succeed
-        (\{} gengVersion platform target sourceDirectories ->
-            { platform = platform
+        (\{} gengVersion runtime target sourceDirectories ->
+            { runtime = runtime
             , target = Maybe.withDefault "js" target
             , sourceDirectories = Maybe.withDefault [ Path.fromPosixString "src" ] sourceDirectories
             , gengVersion = gengVersion
@@ -316,6 +319,57 @@ applicationTableDecoder =
         |> Decode.andMap (Decode.field "runtime" runtimeDecoder)
         |> Decode.andMap (Decode.optionalField "target" (Decode.string |> Decode.andThen oneTarget))
         |> Decode.andMap (Decode.optionalField "source-directories" (Decode.array srcDirDecoder))
+        |> Decode.andThen reachesRuntime
+
+
+{-| D405: an application's runtime has to be one its target reaches, so a
+`beam` program cannot say `node` and then depend on a JavaScript package.
+-}
+reachesRuntime : { a | runtime : Runtime, target : String } -> Decoder { a | runtime : Runtime, target : String }
+reachesRuntime application =
+    let
+        reached =
+            runtimesFor application.target
+    in
+    if Array.member application.runtime reached then
+        Decode.succeed application
+
+    else
+        Decode.fail
+            ("the runtime \""
+                ++ Runtime.toString application.runtime
+                ++ "\" is not one the target \""
+                ++ application.target
+                ++ "\" reaches; it reaches "
+                ++ String.join ", " (Array.map Runtime.toString reached)
+            )
+
+
+{-| The runtimes a target reaches, which is `m1b-manifest.md` §MF9.5's table
+(D405). `wasm` reaches what `js` does, since D77 serves it with `js` externs.
+`native`'s row is written for completeness: no runtime below `os` is built yet,
+so the runtime is refused before the table is asked.
+-}
+runtimesFor : String -> Array Runtime
+runtimesFor target =
+    when target is
+        "beam" ->
+            [ Runtime.Any, Runtime.Beam ]
+
+        "native" ->
+            [ Runtime.Any, Runtime.Os, Runtime.Linux, Runtime.Darwin, Runtime.Windows, Runtime.Host ]
+
+        _ ->
+            [ Runtime.Any, Runtime.Browser, Runtime.Node ]
+
+
+{-| The platform the backend is told an application is: its runtime's, which
+for `beam` is `node` (D405, `Compiler.Runtime.toPlatform`).
+-}
+appPlatform : AppOutline -> Platform
+appPlatform app =
+    Runtime.toPlatform app.runtime
+        |> Maybe.withDefault Platform.Common
 
 
 pkgDecoder : Decoder PkgOutline
@@ -376,30 +430,25 @@ platformTableDecoder =
         |> Decode.andMap (Decode.optionalField "target" packageTargetDecoder)
 
 
-{-| An application's runtime. The compiler builds for three of D24's, which are
-the platforms it had before it had the hierarchy: `any` is what `common` was.
+{-| An application's runtime. The compiler builds for four of D24's: the three
+platforms it had before it had the hierarchy, where `any` is what `common` was,
+and `beam` (D405).
 -}
-runtimeDecoder : Decoder Platform
+runtimeDecoder : Decoder Runtime
 runtimeDecoder =
     Decode.string
         |> Decode.andThen
             (\value ->
-                when value is
-                    "any" ->
-                        Decode.succeed Platform.Common
-
-                    "browser" ->
-                        Decode.succeed Platform.Browser
-
-                    "node" ->
-                        Decode.succeed Platform.Node
-
-                    _ ->
-                        if Array.member value [ "beam", "os", "linux", "darwin", "windows", "host" ] then
-                            Decode.fail ("the runtime \"" ++ value ++ "\" is not one this compiler builds for; it builds for any, browser and node")
+                when Runtime.fromString value is
+                    Just runtime ->
+                        if Runtime.isBuilt runtime then
+                            Decode.succeed runtime
 
                         else
-                            Decode.fail ("\"" ++ value ++ "\" is not a runtime; the runtimes are any, browser, node, beam, os, linux, darwin, windows and host")
+                            Decode.fail ("the runtime \"" ++ value ++ "\" is not one this compiler builds for; it builds for any, browser, node and beam")
+
+                    Nothing ->
+                        Decode.fail ("\"" ++ value ++ "\" is not a runtime; the runtimes are any, browser, node, beam, os, linux, darwin, windows and host")
             )
 
 
@@ -824,17 +873,6 @@ toToml outline =
                         deps
                    )
 
-        runtime platform =
-            quote <|
-                when platform is
-                    Platform.Common ->
-                        "any"
-
-                    Platform.Browser ->
-                        "browser"
-
-                    Platform.Node ->
-                        "node"
 
         stringArray values =
             "[" ++ String.join ", " (Array.map quote values) ++ "]"
@@ -843,7 +881,8 @@ toToml outline =
         App app ->
             "[application]\n"
                 ++ line "geng" (quote (SemanticVersionRange.toString app.gengVersion))
-                ++ line "runtime" (runtime app.platform)
+                ++ line "runtime" (quote (Runtime.toString app.runtime))
+                ++ (if app.target == "js" then "" else line "target" (quote app.target))
                 ++ line "source-directories" (stringArray (Array.map Path.toPosixString app.sourceDirectories))
                 ++ dependencies app.dependencies
 
@@ -1009,7 +1048,7 @@ toJson chosen outline =
             in
             Encode.object
                 [ { key = "type", value = Encode.string "application" }
-                , { key = "platform", value = Platform.toJson app.platform }
+                , { key = "platform", value = Platform.toJson (appPlatform app) }
                 , { key = "target", value = Encode.string app.target }
                 , { key = "source-directories", value = Encode.array (Encode.string << Path.toPosixString) app.sourceDirectories }
                 , { key = "gren-version", value = SemanticVersion.toJson (SemanticVersionRange.lowerBound app.gengVersion) }
