@@ -96,11 +96,18 @@ ranges, as a package's are: the versions chosen are the lock file's business,
 not the manifest's. `runtime` is one the compiler builds for and one its
 `target` reaches ([runtimesFor](#runtimesFor)), and `target` is what it is
 built for, `js` unless it says otherwise.
+
+`erlangLibraries` is a `beam` application's `erlang-libraries`: directories
+relative to the manifest, each holding OTP applications as `ERL_LIBS` has them
+(`rebar3`'s `_build/default/lib`), for the Erlang libraries its `src/Ext`
+modules use and that Geng does not fetch (geng-lang `m2-interop.md` D418).
+Only a `beam` application may have any.
 -}
 type alias AppOutline =
     { runtime : Runtime
     , target : String
     , sourceDirectories : Array Path
+    , erlangLibraries : Array Path
     , gengVersion : SemanticVersionRange
     , dependencies : Dict String SemanticVersionRange
     , sources : Dict String Source
@@ -293,6 +300,7 @@ appDecoder =
             { runtime = application.runtime
             , target = application.target
             , sourceDirectories = application.sourceDirectories
+            , erlangLibraries = application.erlangLibraries
             , gengVersion = application.gengVersion
             , dependencies = dependencies
             , sources = sources
@@ -304,22 +312,55 @@ appDecoder =
         |> Decode.andMap sourcesTableDecoder
 
 
-applicationTableDecoder : Decoder { runtime : Runtime, target : String, sourceDirectories : Array Path, gengVersion : SemanticVersionRange }
+applicationTableDecoder : Decoder { runtime : Runtime, target : String, sourceDirectories : Array Path, erlangLibraries : Array Path, gengVersion : SemanticVersionRange }
 applicationTableDecoder =
     Decode.succeed
-        (\{} gengVersion runtime target sourceDirectories ->
+        (\{} gengVersion runtime target sourceDirectories erlangLibraries ->
             { runtime = runtime
             , target = Maybe.withDefault "js" target
             , sourceDirectories = Maybe.withDefault [ Path.fromPosixString "src" ] sourceDirectories
+            , erlangLibraries = Maybe.withDefault [] erlangLibraries
             , gengVersion = gengVersion
             }
         )
-        |> Decode.andMap (onlyKeys [ "geng", "runtime", "target", "source-directories" ])
+        |> Decode.andMap (onlyKeys [ "geng", "runtime", "target", "source-directories", "erlang-libraries" ])
         |> Decode.andMap (Decode.field "geng" rangeDecoder)
         |> Decode.andMap (Decode.field "runtime" runtimeDecoder)
         |> Decode.andMap (Decode.optionalField "target" (Decode.string |> Decode.andThen oneTarget))
         |> Decode.andMap (Decode.optionalField "source-directories" (Decode.array srcDirDecoder))
+        |> Decode.andMap (Decode.optionalField "erlang-libraries" (Decode.array libraryDirDecoder))
         |> Decode.andThen reachesRuntime
+        |> Decode.andThen librariesOnBeam
+
+
+{-| D418: `erlang-libraries` is for `erlc` and the BEAM's code path, so an
+application built for anything else has no use for it and is told so.
+-}
+librariesOnBeam : { a | target : String, erlangLibraries : Array Path } -> Decoder { a | target : String, erlangLibraries : Array Path }
+librariesOnBeam application =
+    if Array.isEmpty application.erlangLibraries || application.target == "beam" then
+        Decode.succeed application
+
+    else
+        Decode.fail
+            ("erlang-libraries is for a beam application, and this one's target is \""
+                ++ application.target
+                ++ "\""
+            )
+
+
+libraryDirDecoder : Decoder Path
+libraryDirDecoder =
+    Decode.string
+        |> Decode.map Path.fromPosixString
+        |> Decode.andThen
+            (\path ->
+                if path.root == "" then
+                    Decode.succeed path
+
+                else
+                    Decode.fail ("an Erlang library directory is relative to the manifest, and " ++ Path.toPosixString path ++ " is absolute")
+            )
 
 
 {-| D405: an application's runtime has to be one its target reaches, so a
@@ -884,6 +925,7 @@ toToml outline =
                 ++ line "runtime" (quote (Runtime.toString app.runtime))
                 ++ (if app.target == "js" then "" else line "target" (quote app.target))
                 ++ line "source-directories" (stringArray (Array.map Path.toPosixString app.sourceDirectories))
+                ++ (if Array.isEmpty app.erlangLibraries then "" else line "erlang-libraries" (stringArray (Array.map Path.toPosixString app.erlangLibraries)))
                 ++ dependencies app.dependencies
 
         Pkg pkg ->
