@@ -7,14 +7,13 @@ module Compiler.Paths exposing
     , cacheRootToPath
     , backendBinary
     , packageSources
-    , repl
     , exists
     )
 
 
 {-| Paths commonly used by the compiler.
 
-@docs projectRoot, projectOutline, CacheRoot, cacheRoot, cacheRootToPath, backendBinary, packageSources, repl, exists
+@docs projectRoot, projectOutline, CacheRoot, cacheRoot, cacheRootToPath, backendBinary, packageSources, exists
 -}
 
 
@@ -135,13 +134,6 @@ backendBinary platform (CacheRoot cache) =
 packageSources : CacheRoot -> Path
 packageSources (CacheRoot cache) =
     Path.prepend cache (Path.fromPosixString "packages")
-
-
-{-| The `Path` for the project that backs the `geng repl` command.
--}
-repl : CacheRoot -> Path
-repl (CacheRoot cache) =
-    Path.prepend cache (Path.fromPosixString "repl")
 
 
 {-| Checks to see if the given `Path` points to a real file.
