@@ -107,7 +107,9 @@ Only a `beam` application may have any.
 application's name, an Erlang atom that is also its directory and its `.app`
 file's, and its version, which is the `.app`'s and a release's (geng-lang
 `m2-otp-app.md` D432). A build without them names the application after its
-output and gives it version 0.0.0; a release asks for both.
+output and gives it version 0.0.0; a release asks for both. `supervisor`
+names the module whose `supervisor : Beam.Supervisor.Supervisor` is the
+application's supervision tree, which the application starts (D436).
 -}
 type alias AppOutline =
     { runtime : Runtime
@@ -116,6 +118,7 @@ type alias AppOutline =
     , erlangLibraries : Array Path
     , name : Maybe String
     , version : Maybe SemanticVersion
+    , supervisor : Maybe String
     , gengVersion : SemanticVersionRange
     , dependencies : Dict String SemanticVersionRange
     , sources : Dict String Source
@@ -311,6 +314,7 @@ appDecoder =
             , erlangLibraries = application.erlangLibraries
             , name = application.name
             , version = application.version
+            , supervisor = application.supervisor
             , gengVersion = application.gengVersion
             , dependencies = dependencies
             , sources = sources
@@ -322,20 +326,21 @@ appDecoder =
         |> Decode.andMap sourcesTableDecoder
 
 
-applicationTableDecoder : Decoder { runtime : Runtime, target : String, sourceDirectories : Array Path, erlangLibraries : Array Path, name : Maybe String, version : Maybe SemanticVersion, gengVersion : SemanticVersionRange }
+applicationTableDecoder : Decoder { runtime : Runtime, target : String, sourceDirectories : Array Path, erlangLibraries : Array Path, name : Maybe String, version : Maybe SemanticVersion, supervisor : Maybe String, gengVersion : SemanticVersionRange }
 applicationTableDecoder =
     Decode.succeed
-        (\{} gengVersion runtime target sourceDirectories erlangLibraries name version ->
+        (\{} gengVersion runtime target sourceDirectories erlangLibraries name version supervisor ->
             { runtime = runtime
             , target = Maybe.withDefault "js" target
             , sourceDirectories = Maybe.withDefault [ Path.fromPosixString "src" ] sourceDirectories
             , erlangLibraries = Maybe.withDefault [] erlangLibraries
             , name = name
             , version = version
+            , supervisor = supervisor
             , gengVersion = gengVersion
             }
         )
-        |> Decode.andMap (onlyKeys [ "geng", "runtime", "target", "source-directories", "erlang-libraries", "name", "version" ])
+        |> Decode.andMap (onlyKeys [ "geng", "runtime", "target", "source-directories", "erlang-libraries", "name", "version", "supervisor" ])
         |> Decode.andMap (Decode.field "geng" rangeDecoder)
         |> Decode.andMap (Decode.field "runtime" runtimeDecoder)
         |> Decode.andMap (Decode.optionalField "target" (Decode.string |> Decode.andThen oneTarget))
@@ -343,6 +348,7 @@ applicationTableDecoder =
         |> Decode.andMap (Decode.optionalField "erlang-libraries" (Decode.array libraryDirDecoder))
         |> Decode.andMap (Decode.optionalField "name" applicationNameDecoder)
         |> Decode.andMap (Decode.optionalField "version" versionDecoder)
+        |> Decode.andMap (Decode.optionalField "supervisor" supervisorModuleDecoder)
         |> Decode.andThen reachesRuntime
         |> Decode.andThen librariesOnBeam
         |> Decode.andThen identityOnBeam
@@ -351,14 +357,14 @@ applicationTableDecoder =
 {-| D432: `name` and `version` are an OTP application's, so an application
 built for anything else has no use for them and is told so.
 -}
-identityOnBeam : { a | target : String, name : Maybe String, version : Maybe SemanticVersion } -> Decoder { a | target : String, name : Maybe String, version : Maybe SemanticVersion }
+identityOnBeam : { a | target : String, name : Maybe String, version : Maybe SemanticVersion, supervisor : Maybe String } -> Decoder { a | target : String, name : Maybe String, version : Maybe SemanticVersion, supervisor : Maybe String }
 identityOnBeam application =
-    if application.target == "beam" || (application.name == Nothing && application.version == Nothing) then
+    if application.target == "beam" || (application.name == Nothing && application.version == Nothing && application.supervisor == Nothing) then
         Decode.succeed application
 
     else
         Decode.fail
-            ("name and version are a beam application's OTP identity, and this one's target is \""
+            ("name, version and supervisor are a beam application's OTP identity, and this one's target is \""
                 ++ application.target
                 ++ "\""
             )
@@ -383,6 +389,37 @@ applicationNameDecoder =
                             ++ "\" is not an OTP application's name: it is an Erlang atom that needs no quotes, a lower-case letter and then letters, digits and underscores, such as \"grid\" or \"job_store\""
                         )
             )
+
+
+{-| D436: the module the application's tree is in, a module name as an import
+writes it.
+-}
+supervisorModuleDecoder : Decoder String
+supervisorModuleDecoder =
+    Decode.string
+        |> Decode.andThen
+            (\name ->
+                if not (String.isEmpty name) && Array.all isModuleSegment (String.split "." name) then
+                    Decode.succeed name
+
+                else
+                    Decode.fail
+                        ("supervisor \""
+                            ++ name
+                            ++ "\" is not a module's name: it is the module whose `supervisor` value is the application's tree, written as an import writes it, such as \"Grid.Tree\""
+                        )
+            )
+
+
+isModuleSegment : String -> Bool
+isModuleSegment segment =
+    when String.popFirst segment is
+        Just { first, rest } ->
+            (first >= 'A' && first <= 'Z')
+                && String.all (\c -> (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_') rest
+
+        Nothing ->
+            False
 
 
 isApplicationName : String -> Bool
@@ -1005,6 +1042,13 @@ toToml outline =
                 ++ (when app.version is
                         Just version ->
                             line "version" (quote (SemanticVersion.toString version))
+
+                        Nothing ->
+                            ""
+                   )
+                ++ (when app.supervisor is
+                        Just supervisor ->
+                            line "supervisor" (quote supervisor)
 
                         Nothing ->
                             ""
