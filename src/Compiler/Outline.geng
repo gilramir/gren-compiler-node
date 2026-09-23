@@ -102,12 +102,20 @@ relative to the manifest, each holding OTP applications as `ERL_LIBS` has them
 (`rebar3`'s `_build/default/lib`), for the Erlang libraries its `src/Ext`
 modules use and that Geng does not fetch (geng-lang `m2-interop.md` D418).
 Only a `beam` application may have any.
+
+`name` and `version` are a `beam` application's OTP identity: the
+application's name, an Erlang atom that is also its directory and its `.app`
+file's, and its version, which is the `.app`'s and a release's (geng-lang
+`m2-otp-app.md` D432). A build without them names the application after its
+output and gives it version 0.0.0; a release asks for both.
 -}
 type alias AppOutline =
     { runtime : Runtime
     , target : String
     , sourceDirectories : Array Path
     , erlangLibraries : Array Path
+    , name : Maybe String
+    , version : Maybe SemanticVersion
     , gengVersion : SemanticVersionRange
     , dependencies : Dict String SemanticVersionRange
     , sources : Dict String Source
@@ -301,6 +309,8 @@ appDecoder =
             , target = application.target
             , sourceDirectories = application.sourceDirectories
             , erlangLibraries = application.erlangLibraries
+            , name = application.name
+            , version = application.version
             , gengVersion = application.gengVersion
             , dependencies = dependencies
             , sources = sources
@@ -312,25 +322,84 @@ appDecoder =
         |> Decode.andMap sourcesTableDecoder
 
 
-applicationTableDecoder : Decoder { runtime : Runtime, target : String, sourceDirectories : Array Path, erlangLibraries : Array Path, gengVersion : SemanticVersionRange }
+applicationTableDecoder : Decoder { runtime : Runtime, target : String, sourceDirectories : Array Path, erlangLibraries : Array Path, name : Maybe String, version : Maybe SemanticVersion, gengVersion : SemanticVersionRange }
 applicationTableDecoder =
     Decode.succeed
-        (\{} gengVersion runtime target sourceDirectories erlangLibraries ->
+        (\{} gengVersion runtime target sourceDirectories erlangLibraries name version ->
             { runtime = runtime
             , target = Maybe.withDefault "js" target
             , sourceDirectories = Maybe.withDefault [ Path.fromPosixString "src" ] sourceDirectories
             , erlangLibraries = Maybe.withDefault [] erlangLibraries
+            , name = name
+            , version = version
             , gengVersion = gengVersion
             }
         )
-        |> Decode.andMap (onlyKeys [ "geng", "runtime", "target", "source-directories", "erlang-libraries" ])
+        |> Decode.andMap (onlyKeys [ "geng", "runtime", "target", "source-directories", "erlang-libraries", "name", "version" ])
         |> Decode.andMap (Decode.field "geng" rangeDecoder)
         |> Decode.andMap (Decode.field "runtime" runtimeDecoder)
         |> Decode.andMap (Decode.optionalField "target" (Decode.string |> Decode.andThen oneTarget))
         |> Decode.andMap (Decode.optionalField "source-directories" (Decode.array srcDirDecoder))
         |> Decode.andMap (Decode.optionalField "erlang-libraries" (Decode.array libraryDirDecoder))
+        |> Decode.andMap (Decode.optionalField "name" applicationNameDecoder)
+        |> Decode.andMap (Decode.optionalField "version" versionDecoder)
         |> Decode.andThen reachesRuntime
         |> Decode.andThen librariesOnBeam
+        |> Decode.andThen identityOnBeam
+
+
+{-| D432: `name` and `version` are an OTP application's, so an application
+built for anything else has no use for them and is told so.
+-}
+identityOnBeam : { a | target : String, name : Maybe String, version : Maybe SemanticVersion } -> Decoder { a | target : String, name : Maybe String, version : Maybe SemanticVersion }
+identityOnBeam application =
+    if application.target == "beam" || (application.name == Nothing && application.version == Nothing) then
+        Decode.succeed application
+
+    else
+        Decode.fail
+            ("name and version are a beam application's OTP identity, and this one's target is \""
+                ++ application.target
+                ++ "\""
+            )
+
+
+{-| D432: an application's name is an Erlang atom that needs no quotes — a
+lower-case ASCII letter, then letters, digits and underscores — since it is
+also a directory's name and a `.app` file's, and at most 255 bytes.
+-}
+applicationNameDecoder : Decoder String
+applicationNameDecoder =
+    Decode.string
+        |> Decode.andThen
+            (\name ->
+                if isApplicationName name then
+                    Decode.succeed name
+
+                else
+                    Decode.fail
+                        ("name \""
+                            ++ name
+                            ++ "\" is not an OTP application's name: it is an Erlang atom that needs no quotes, a lower-case letter and then letters, digits and underscores, such as \"grid\" or \"job_store\""
+                        )
+            )
+
+
+isApplicationName : String -> Bool
+isApplicationName name =
+    let
+        lower c =
+            c >= 'a' && c <= 'z'
+
+        rest c =
+            lower c || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'
+    in
+    when String.popFirst name is
+        Just { first, rest = tail } ->
+            lower first && String.all rest tail && String.count name <= 255
+
+        Nothing ->
+            False
 
 
 {-| D418: `erlang-libraries` is for `erlc` and the BEAM's code path, so an
@@ -926,6 +995,20 @@ toToml outline =
                 ++ (if app.target == "js" then "" else line "target" (quote app.target))
                 ++ line "source-directories" (stringArray (Array.map Path.toPosixString app.sourceDirectories))
                 ++ (if Array.isEmpty app.erlangLibraries then "" else line "erlang-libraries" (stringArray (Array.map Path.toPosixString app.erlangLibraries)))
+                ++ (when app.name is
+                        Just name ->
+                            line "name" (quote name)
+
+                        Nothing ->
+                            ""
+                   )
+                ++ (when app.version is
+                        Just version ->
+                            line "version" (quote (SemanticVersion.toString version))
+
+                        Nothing ->
+                            ""
+                   )
                 ++ dependencies app.dependencies
 
         Pkg pkg ->
