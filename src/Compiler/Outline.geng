@@ -494,8 +494,8 @@ reachesRuntime application =
 
 {-| The runtimes a target reaches, which is `m1b-manifest.md` §MF9.5's table
 (D405). `wasm` reaches what `js` does, since D77 serves it with `js` externs.
-`native`'s row is written for completeness: no runtime below `os` is built yet,
-so the runtime is refused before the table is asked.
+Of `native`'s row, `any` and `os` are built; no runtime below `os` is yet, so
+those are refused before the table is asked.
 -}
 runtimesFor : String -> Array Runtime
 runtimesFor target =
@@ -577,9 +577,10 @@ platformTableDecoder =
         |> Decode.andMap (Decode.optionalField "target" packageTargetDecoder)
 
 
-{-| An application's runtime. The compiler builds for four of D24's: the three
+{-| An application's runtime. The compiler builds for five of D24's: the three
 platforms it had before it had the hierarchy, where `any` is what `common` was,
-and `beam` (D405).
+`beam` (D405) and `os` (geng-lang `m3-native.md` §NA20), as
+`Compiler.Runtime.built` lists them.
 -}
 runtimeDecoder : Decoder Runtime
 runtimeDecoder =
@@ -592,7 +593,7 @@ runtimeDecoder =
                             Decode.succeed runtime
 
                         else
-                            Decode.fail ("the runtime \"" ++ value ++ "\" is not one this compiler builds for; it builds for any, browser, node and beam")
+                            Decode.fail ("the runtime \"" ++ value ++ "\" is not one this compiler builds for; it builds for " ++ Runtime.builtNames)
 
                     Nothing ->
                         Decode.fail ("\"" ++ value ++ "\" is not a runtime; the runtimes are any, browser, node, beam, os, linux, darwin, windows and host")
