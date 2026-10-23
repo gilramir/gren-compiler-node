@@ -110,6 +110,10 @@ file's, and its version, which is the `.app`'s and a release's (geng-lang
 output and gives it version 0.0.0; a release asks for both. `supervisor`
 names the module whose `supervisor : Beam.Supervisor.Supervisor` is the
 application's supervision tree, which the application starts (D436).
+
+`pkgConfig` is the `[native]` table's `pkg-config`: the `pkg-config` modules the
+application's own `src/Ext/*.c` needs, as a package's is (geng-lang D890, D891).
+Only a `native` application may have any.
 -}
 type alias AppOutline =
     { runtime : Runtime
@@ -119,6 +123,7 @@ type alias AppOutline =
     , name : Maybe String
     , version : Maybe SemanticVersion
     , supervisor : Maybe String
+    , pkgConfig : Array String
     , gengVersion : SemanticVersionRange
     , dependencies : Dict String SemanticVersionRange
     , sources : Dict String Source
@@ -134,6 +139,11 @@ Its `runtime` may be any of D24's, including those the compiler does not build
 for, which a build refuses when it needs the package (D319). Its `target` is
 what it declares, if it declares one; what its externs serve is derived by the
 backend and checked against it (D318).
+
+`pkgConfig` is its `[native]` table's `pkg-config`: the `pkg-config` modules its
+`src/Ext/*.c` needs. A native build compiles that C with their `--cflags` and
+links their `--libs` after every object (geng-lang D890). A build for any other
+target does not read it.
 -}
 type alias PkgOutline =
     { runtime : Runtime
@@ -143,6 +153,7 @@ type alias PkgOutline =
     , license : License
     , version : SemanticVersion
     , exposedModules : Exposed
+    , pkgConfig : Array String
     , gengVersion : SemanticVersionRange
     , dependencies : Dict String SemanticVersionRange
     , sources : Dict String Source
@@ -307,7 +318,7 @@ onlyKeys allowed =
 appDecoder : Decoder AppOutline
 appDecoder =
     Decode.succeed
-        (\{} application dependencies sources ->
+        (\{} application pkgConfig dependencies sources ->
             { runtime = application.runtime
             , target = application.target
             , sourceDirectories = application.sourceDirectories
@@ -315,15 +326,89 @@ appDecoder =
             , name = application.name
             , version = application.version
             , supervisor = application.supervisor
+            , pkgConfig = pkgConfig
             , gengVersion = application.gengVersion
             , dependencies = dependencies
             , sources = sources
             }
         )
-        |> Decode.andMap (onlyKeys [ "application", "dependencies", "sources" ])
+        |> Decode.andMap (onlyKeys [ "application", "native", "dependencies", "sources" ])
         |> Decode.andMap (Decode.field "application" applicationTableDecoder)
+        |> Decode.andMap nativeTableDecoder
         |> Decode.andMap dependenciesTableDecoder
         |> Decode.andMap sourcesTableDecoder
+        |> Decode.andThen nativeOnNative
+
+
+{-| D891: an application's `[native]` table is for the C a native build
+compiles, so an application built for another target has no use for one and
+is told so, as `erlang-libraries` is told off the BEAM (D418).
+-}
+nativeOnNative : AppOutline -> Decoder AppOutline
+nativeOnNative app =
+    if app.target == "native" || Array.isEmpty app.pkgConfig then
+        Decode.succeed app
+
+    else
+        Decode.fail
+            ("[native] is for an application built for native, and this one's target is \""
+                ++ app.target
+                ++ "\""
+            )
+
+
+{-| The `[native]` table, if there is one: its `pkg-config` modules (geng-lang
+D890). A module name is what `pkg-config` itself reads as one, and one that
+starts with `-` would be read as an option, so letters, digits and `._+-`,
+starting with a letter or digit, are the names allowed. A name given twice is
+refused, being a mistake that says nothing.
+-}
+nativeTableDecoder : Decoder (Array String)
+nativeTableDecoder =
+    Decode.optionalField "native"
+        (Decode.succeed (\{} modules -> Maybe.withDefault [] modules)
+            |> Decode.andMap (onlyKeys [ "pkg-config" ])
+            |> Decode.andMap (Decode.optionalField "pkg-config" (Decode.array pkgConfigModuleDecoder))
+            |> Decode.andThen
+                (\modules ->
+                    when Array.findFirst (\m -> Array.length (Array.keepIf ((==) m) modules) > 1) modules is
+                        Just { value = twice } ->
+                            Decode.fail ("\"" ++ twice ++ "\" is named twice in pkg-config")
+
+                        Nothing ->
+                            Decode.succeed modules
+                )
+        )
+        |> Decode.map (Maybe.withDefault [])
+
+
+pkgConfigModuleDecoder : Decoder String
+pkgConfigModuleDecoder =
+    let
+        allowed char =
+            Char.isAlphaNum char && Char.toCode char < 128 || char == '.' || char == '_' || char == '+' || char == '-'
+
+        startsWell name =
+            when String.popFirst name is
+                Just { first } ->
+                    Char.isAlphaNum first && Char.toCode first < 128
+
+                Nothing ->
+                    False
+    in
+    Decode.string
+        |> Decode.andThen
+            (\name ->
+                if startsWell name && String.all allowed name then
+                    Decode.succeed name
+
+                else
+                    Decode.fail
+                        ("\""
+                            ++ name
+                            ++ "\" is not a pkg-config module name: a name is letters, digits and . _ + -, starting with a letter or digit"
+                        )
+            )
 
 
 applicationTableDecoder : Decoder { runtime : Runtime, target : String, sourceDirectories : Array Path, erlangLibraries : Array Path, name : Maybe String, version : Maybe SemanticVersion, supervisor : Maybe String, gengVersion : SemanticVersionRange }
@@ -523,7 +608,7 @@ appPlatform app =
 pkgDecoder : Decoder PkgOutline
 pkgDecoder =
     Decode.succeed
-        (\{} package platform exposed dependencies sources ->
+        (\{} package platform exposed pkgConfig dependencies sources ->
             { runtime = platform.runtime
             , target = platform.target
             , name = package.name
@@ -531,15 +616,17 @@ pkgDecoder =
             , license = package.license
             , version = package.version
             , exposedModules = exposed
+            , pkgConfig = pkgConfig
             , gengVersion = package.gengVersion
             , dependencies = dependencies
             , sources = sources
             }
         )
-        |> Decode.andMap (onlyKeys [ "package", "platform", "modules", "dependencies", "sources" ])
+        |> Decode.andMap (onlyKeys [ "package", "platform", "modules", "native", "dependencies", "sources" ])
         |> Decode.andMap (Decode.field "package" packageTableDecoder)
         |> Decode.andMap (Decode.field "platform" platformTableDecoder)
         |> Decode.andMap (Decode.at [ "modules", "exposed" ] exposedDecoder)
+        |> Decode.andMap nativeTableDecoder
         |> Decode.andMap dependenciesTableDecoder
         |> Decode.andMap sourcesTableDecoder
 
@@ -1025,6 +1112,13 @@ toToml outline =
 
         stringArray values =
             "[" ++ String.join ", " (Array.map quote values) ++ "]"
+
+        native modules =
+            if Array.isEmpty modules then
+                ""
+
+            else
+                "\n[native]\n" ++ line "pkg-config" (stringArray modules)
     in
     when outline is
         App app ->
@@ -1055,6 +1149,7 @@ toToml outline =
                         Nothing ->
                             ""
                    )
+                ++ native app.pkgConfig
                 ++ dependencies app.dependencies
 
         Pkg pkg ->
@@ -1077,6 +1172,7 @@ toToml outline =
                                 "\n[modules.exposed]\n"
                                 groups
                    )
+                ++ native pkg.pkgConfig
                 ++ dependencies pkg.dependencies
 
 
@@ -1154,6 +1250,9 @@ removeDependency name text =
 
 
 {-| JSON Decoder for the [PkgOutline](#PkgOutline) in a package bundle.
+
+A bundle keeps neither a package's `target` nor its `[native]` table, and a
+build never reads one: a dependency is read from its `geng.toml`.
 -}
 pkgJsonDecoder : Json.Decode.Decoder PkgOutline
 pkgJsonDecoder =
@@ -1166,6 +1265,7 @@ pkgJsonDecoder =
             , license = license
             , version = version
             , exposedModules = exposedModules
+            , pkgConfig = []
             , gengVersion = gengVersion
             , dependencies = dependencies
             , sources = Dict.empty
