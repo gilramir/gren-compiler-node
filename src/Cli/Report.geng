@@ -114,7 +114,7 @@ toString outputType pathToString report =
                             errorBarEnd =
                                 when maybePath is
                                     Nothing ->
-                                        makeDashes (4 + String.count title)
+                                        " " ++ makeDashes (4 + String.count title)
 
                                     Just path ->
                                         let
