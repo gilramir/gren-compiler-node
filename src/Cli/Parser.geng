@@ -20,6 +20,7 @@ module Cli.Parser exposing
     , twoArgs
     , threeArgs
     , zeroOrMoreArgs
+    , oneArgThenRest
     , mapArgs
     , oneOfArgs
     --
@@ -721,6 +722,33 @@ zeroOrMoreArgs parseFn =
 
             else
                 Ok parsedArgs
+        }
+
+
+{-| One argument, then any number more, each kept as it was given: a module
+and what the program built from it is run with (geng-lang `m4-profile.md`
+T2). The rest come after `--` when they look like flags.
+-}
+oneArgThenRest : ValueParser val -> ArgumentParser { first : val, rest : Array String }
+oneArgThenRest parseFn =
+    ArgumentParser
+        { description = "<" ++ parseFn.singular ++ "> [-- <argument>...]"
+        , parseFn = \args ->
+            when Array.first args is
+                Just arg ->
+                    parseFn.fn arg
+                        |> Maybe.map (\v -> Ok { first = v, rest = Array.dropFirst 1 args })
+                        |> Maybe.withDefault
+                            (Err <|
+                                ArgumentParserInvalidArgument
+                                    { argument = arg
+                                    , title = parseFn.singular
+                                    , examples = parseFn.examples
+                                    }
+                            )
+
+                Nothing ->
+                    Err <| ArgumentParserWrongArity { expected = 1, actual = 0 }
         }
 
 
