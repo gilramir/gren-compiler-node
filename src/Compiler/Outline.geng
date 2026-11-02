@@ -652,9 +652,31 @@ packageTableDecoder =
         |> Decode.andMap (onlyKeys [ "name", "version", "summary", "license", "geng" ])
         |> Decode.andMap (Decode.field "name" packageNameDecoder)
         |> Decode.andMap (Decode.field "version" versionDecoder)
-        |> Decode.andMap (Decode.optionalField "summary" Decode.string)
+        |> Decode.andMap (Decode.optionalField "summary" summaryDecoder)
         |> Decode.andMap (Decode.field "license" licenseDecoder)
         |> Decode.andMap (Decode.field "geng" rangeDecoder)
+
+
+{-| A package's summary, which the backend's outline holds to fewer than 80
+bytes as JSON writes it (`Gren.Outline.summaryDecoder`). Refused here with
+the manifest's error, where the backend's refusal is a crash
+(visiterm `renderer.md` §R9).
+-}
+summaryDecoder : Decoder String
+summaryDecoder =
+    Decode.string
+        |> Decode.andThen
+            (\summary ->
+                let
+                    size =
+                        Bytes.length (Bytes.fromString (Encode.encode 0 (Encode.string summary))) - 2
+                in
+                if size < 80 then
+                    Decode.succeed summary
+
+                else
+                    Decode.fail ("a summary must be shorter than 80 bytes, and this one is " ++ String.fromInt size)
+            )
 
 
 platformTableDecoder : Decoder { runtime : Runtime, target : Maybe PackageTarget }
