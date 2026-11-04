@@ -306,15 +306,19 @@ splitByLength size str =
 
 splitByLengthHelper : Int -> String -> Array String -> Array String
 splitByLengthHelper size str acc =
-    if str == "" then
-        acc
+    let
+        -- the characters once, and each piece a slice of them: `takeFirst`
+        -- and `dropFirst` on the rest cost the rest's length at every piece
+        chars = String.toArray str
 
-    else
-        let
-            first = String.takeFirst size str
-            rest = String.dropFirst size str
-        in
-        splitByLengthHelper size rest (Array.pushLast first acc)
+        pieces start done =
+            if start >= Array.length chars then
+                done
+
+            else
+                pieces (start + size) (Array.pushLast (String.fromArray (Array.slice start (start + size) chars)) done)
+    in
+    pieces 0 acc
 
 
 type alias WordSplitter =
