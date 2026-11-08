@@ -660,7 +660,7 @@ packageTableDecoder =
 {-| A package's summary, which the backend's outline holds to fewer than 80
 bytes as JSON writes it (`Gren.Outline.summaryDecoder`). Refused here with
 the manifest's error, where the backend's refusal is a crash
-(visiterm `renderer.md` §R9).
+(puritty `renderer.md` §R9).
 -}
 summaryDecoder : Decoder String
 summaryDecoder =
