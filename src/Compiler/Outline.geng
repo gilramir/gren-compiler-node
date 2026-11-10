@@ -113,7 +113,12 @@ application's supervision tree, which the application starts (D436).
 
 `pkgConfig` is the `[native]` table's `pkg-config`: the `pkg-config` modules the
 application's own `src/Ext/*.c` needs, as a package's is (geng-lang D890, D891).
-Only a `native` application may have any.
+`libraries` is its `libraries`: system libraries its C calls that no
+`pkg-config` module names, such as Windows' `gdi32`, each linked as
+`-l<name>` (geng-lang Dnene36). `subsystem` is `"console"` or `"gui"`: on
+Windows a `gui` program is linked for the GUI subsystem, so that no console
+opens beside it (Dnene37); elsewhere it is not read. Only a `native`
+application may have any of them.
 -}
 type alias AppOutline =
     { runtime : Runtime
@@ -124,6 +129,8 @@ type alias AppOutline =
     , version : Maybe SemanticVersion
     , supervisor : Maybe String
     , pkgConfig : Array String
+    , libraries : Array String
+    , subsystem : String
     , gengVersion : SemanticVersionRange
     , dependencies : Dict String SemanticVersionRange
     , sources : Dict String Source
@@ -142,8 +149,9 @@ backend and checked against it (D318).
 
 `pkgConfig` is its `[native]` table's `pkg-config`: the `pkg-config` modules its
 `src/Ext/*.c` needs. A native build compiles that C with their `--cflags` and
-links their `--libs` after every object (geng-lang D890). A build for any other
-target does not read it.
+links their `--libs` after every object (geng-lang D890). `libraries` is the
+table's system libraries, linked as `-l<name>` after them (Dnene36). A build
+for any other target does not read either.
 -}
 type alias PkgOutline =
     { runtime : Runtime
@@ -154,6 +162,7 @@ type alias PkgOutline =
     , version : SemanticVersion
     , exposedModules : Exposed
     , pkgConfig : Array String
+    , libraries : Array String
     , gengVersion : SemanticVersionRange
     , dependencies : Dict String SemanticVersionRange
     , sources : Dict String Source
@@ -318,7 +327,7 @@ onlyKeys allowed =
 appDecoder : Decoder AppOutline
 appDecoder =
     Decode.succeed
-        (\{} application pkgConfig dependencies sources ->
+        (\{} application native dependencies sources ->
             { runtime = application.runtime
             , target = application.target
             , sourceDirectories = application.sourceDirectories
@@ -326,7 +335,9 @@ appDecoder =
             , name = application.name
             , version = application.version
             , supervisor = application.supervisor
-            , pkgConfig = pkgConfig
+            , pkgConfig = native.pkgConfig
+            , libraries = native.libraries
+            , subsystem = Maybe.withDefault "console" native.subsystem
             , gengVersion = application.gengVersion
             , dependencies = dependencies
             , sources = sources
@@ -346,7 +357,7 @@ is told so, as `erlang-libraries` is told off the BEAM (D418).
 -}
 nativeOnNative : AppOutline -> Decoder AppOutline
 nativeOnNative app =
-    if app.target == "native" || Array.isEmpty app.pkgConfig then
+    if app.target == "native" || (Array.isEmpty app.pkgConfig && Array.isEmpty app.libraries && app.subsystem == "console") then
         Decode.succeed app
 
     else
@@ -358,32 +369,52 @@ nativeOnNative app =
 
 
 {-| The `[native]` table, if there is one: its `pkg-config` modules (geng-lang
-D890). A module name is what `pkg-config` itself reads as one, and one that
-starts with `-` would be read as an option, so letters, digits and `._+-`,
-starting with a letter or digit, are the names allowed. A name given twice is
-refused, being a mistake that says nothing.
+D890), its system `libraries` (Dnene36) and its `subsystem` (Dnene37). A
+module or library name is what `pkg-config` and the linker read as one, and
+one that starts with `-` would be read as an option, so letters, digits and
+`._+-`, starting with a letter or digit, are the names allowed. A name given
+twice is refused, being a mistake that says nothing. A subsystem is
+`"console"` or `"gui"`.
 -}
-nativeTableDecoder : Decoder (Array String)
+nativeTableDecoder : Decoder { pkgConfig : Array String, libraries : Array String, subsystem : Maybe String }
 nativeTableDecoder =
-    Decode.optionalField "native"
-        (Decode.succeed (\{} modules -> Maybe.withDefault [] modules)
-            |> Decode.andMap (onlyKeys [ "pkg-config" ])
-            |> Decode.andMap (Decode.optionalField "pkg-config" (Decode.array pkgConfigModuleDecoder))
-            |> Decode.andThen
-                (\modules ->
-                    when Array.findFirst (\m -> Array.length (Array.keepIf ((==) m) modules) > 1) modules is
-                        Just { value = twice } ->
-                            Decode.fail ("\"" ++ twice ++ "\" is named twice in pkg-config")
+    let
+        once what names =
+            when Array.findFirst (\m -> Array.length (Array.keepIf ((==) m) names) > 1) names is
+                Just { value = twice } ->
+                    Decode.fail ("\"" ++ twice ++ "\" is named twice in " ++ what)
 
-                        Nothing ->
-                            Decode.succeed modules
-                )
+                Nothing ->
+                    Decode.succeed names
+
+        subsystemDecoder =
+            Decode.string
+                |> Decode.andThen
+                    (\s ->
+                        if s == "console" || s == "gui" then
+                            Decode.succeed s
+
+                        else
+                            Decode.fail ("\"" ++ s ++ "\" is not a subsystem: it is \"console\" or \"gui\"")
+                    )
+    in
+    Decode.optionalField "native"
+        (Decode.succeed (\{} modules libraries subsystem -> { pkgConfig = Maybe.withDefault [] modules, libraries = Maybe.withDefault [] libraries, subsystem = subsystem })
+            |> Decode.andMap (onlyKeys [ "pkg-config", "libraries", "subsystem" ])
+            |> Decode.andMap (Decode.optionalField "pkg-config" (Decode.array pkgConfigModuleDecoder |> Decode.andThen (once "pkg-config")))
+            |> Decode.andMap (Decode.optionalField "libraries" (Decode.array (nameDecoder "a library") |> Decode.andThen (once "libraries")))
+            |> Decode.andMap (Decode.optionalField "subsystem" subsystemDecoder)
         )
-        |> Decode.map (Maybe.withDefault [])
+        |> Decode.map (Maybe.withDefault { pkgConfig = [], libraries = [], subsystem = Nothing })
 
 
 pkgConfigModuleDecoder : Decoder String
 pkgConfigModuleDecoder =
+    nameDecoder "a pkg-config module"
+
+
+nameDecoder : String -> Decoder String
+nameDecoder what =
     let
         allowed char =
             Char.isAlphaNum char && Char.toCode char < 128 || char == '.' || char == '_' || char == '+' || char == '-'
@@ -406,7 +437,9 @@ pkgConfigModuleDecoder =
                     Decode.fail
                         ("\""
                             ++ name
-                            ++ "\" is not a pkg-config module name: a name is letters, digits and . _ + -, starting with a letter or digit"
+                            ++ "\" is not "
+                            ++ what
+                            ++ " name: a name is letters, digits and . _ + -, starting with a letter or digit"
                         )
             )
 
@@ -608,7 +641,7 @@ appPlatform app =
 pkgDecoder : Decoder PkgOutline
 pkgDecoder =
     Decode.succeed
-        (\{} package platform exposed pkgConfig dependencies sources ->
+        (\{} package platform exposed native dependencies sources ->
             { runtime = platform.runtime
             , target = platform.target
             , name = package.name
@@ -616,7 +649,8 @@ pkgDecoder =
             , license = package.license
             , version = package.version
             , exposedModules = exposed
-            , pkgConfig = pkgConfig
+            , pkgConfig = native.pkgConfig
+            , libraries = native.libraries
             , gengVersion = package.gengVersion
             , dependencies = dependencies
             , sources = sources
@@ -626,7 +660,18 @@ pkgDecoder =
         |> Decode.andMap (Decode.field "package" packageTableDecoder)
         |> Decode.andMap (Decode.field "platform" platformTableDecoder)
         |> Decode.andMap (Decode.at [ "modules", "exposed" ] exposedDecoder)
-        |> Decode.andMap nativeTableDecoder
+        |> Decode.andMap
+            (nativeTableDecoder
+                |> Decode.andThen
+                    (\native ->
+                        when native.subsystem is
+                            Just _ ->
+                                Decode.fail "at native.subsystem: a subsystem is an application's; a package is linked into a program, and the program says which subsystem it is"
+
+                            Nothing ->
+                                Decode.succeed native
+                    )
+            )
         |> Decode.andMap dependenciesTableDecoder
         |> Decode.andMap sourcesTableDecoder
 
@@ -1135,12 +1180,15 @@ toToml outline =
         stringArray values =
             "[" ++ String.join ", " (Array.map quote values) ++ "]"
 
-        native modules =
-            if Array.isEmpty modules then
+        native modules libraries subsystem =
+            if Array.isEmpty modules && Array.isEmpty libraries && subsystem == "console" then
                 ""
 
             else
-                "\n[native]\n" ++ line "pkg-config" (stringArray modules)
+                "\n[native]\n"
+                    ++ (if Array.isEmpty modules then "" else line "pkg-config" (stringArray modules))
+                    ++ (if Array.isEmpty libraries then "" else line "libraries" (stringArray libraries))
+                    ++ (if subsystem == "console" then "" else line "subsystem" (quote subsystem))
     in
     when outline is
         App app ->
@@ -1171,7 +1219,7 @@ toToml outline =
                         Nothing ->
                             ""
                    )
-                ++ native app.pkgConfig
+                ++ native app.pkgConfig app.libraries app.subsystem
                 ++ dependencies app.dependencies
 
         Pkg pkg ->
@@ -1194,7 +1242,7 @@ toToml outline =
                                 "\n[modules.exposed]\n"
                                 groups
                    )
-                ++ native pkg.pkgConfig
+                ++ native pkg.pkgConfig pkg.libraries "console"
                 ++ dependencies pkg.dependencies
 
 
@@ -1288,6 +1336,7 @@ pkgJsonDecoder =
             , version = version
             , exposedModules = exposedModules
             , pkgConfig = []
+            , libraries = []
             , gengVersion = gengVersion
             , dependencies = dependencies
             , sources = Dict.empty
