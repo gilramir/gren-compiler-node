@@ -29,11 +29,6 @@ version = "6.0.0"
 path = "../../../../packages/url"
 
 [[package]]
-name = "github.com/gilramir/gren-bignum"
-version = "1.0.0"
-path = "../../../gilramir/gren-bignum"
-
-[[package]]
 name = "github.com/gilramir/gren-civil-time"
 version = "1.0.0"
 path = "../../../gilramir/gren-civil-time"
